@@ -246,6 +246,7 @@ set -g @agent-indicator-notification-enabled 'on'
 set -g @agent-indicator-notification-states 'needs-input,done'
 set -g @agent-indicator-notification-format '[#{agent_name}] #{agent_state} (#{session_name}:#{window_name})'
 set -g @agent-indicator-notification-duration '5000'
+set -g @agent-indicator-notification-message 'on'
 set -g @agent-indicator-notification-command ''
 
 # Session dots (visual session indicator in status bar)
@@ -351,6 +352,9 @@ set -g @agent-indicator-notification-format '#{agent_name} is #{agent_state} in 
 
 # Duration in milliseconds (0 = use tmux default display-time)
 set -g @agent-indicator-notification-duration '3000'
+
+# Skip the on-screen message but still run the notification command below
+set -g @agent-indicator-notification-message 'off'
 ```
 
 Available format placeholders: `#{agent_name}`, `#{agent_state}`, `#{session_name}`, `#{window_name}`, `#{window_index}`.
@@ -363,6 +367,9 @@ set -g @agent-indicator-notification-command 'echo "$AGENT_NAME $AGENT_STATE" >>
 
 # macOS system notification
 set -g @agent-indicator-notification-command 'osascript -e "display notification \"$AGENT_NAME is $AGENT_STATE\" with title \"tmux agent\""'
+
+# macOS sound only (pair with notification-message 'off')
+set -g @agent-indicator-notification-command 'afplay /System/Library/Sounds/Ping.aiff'
 ```
 
 ## Custom Agent Integration
