@@ -28,6 +28,7 @@ Run individual checks:
 ./tests/test-window-title-reset.sh
 ./tests/test-focus-reset-window-change.sh
 ./tests/test-style-active-window.sh
+./tests/test-if-state.sh
 ./tests/test-notification-command.sh
 ./tests/test-running-animation.sh
 ```

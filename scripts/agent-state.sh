@@ -5,7 +5,8 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF' >&2
-Usage: agent-state.sh --agent <name> --state <running|needs-input|done|off>
+Usage: agent-state.sh --agent <name> --state <running|needs-input|done|off> [--if-state <state>]
+  --if-state  only act when the pane is currently in that state (off = no state recorded)
 EOF
 }
 
@@ -335,6 +336,7 @@ notify_state_change() {
 
 agent=""
 state=""
+if_state=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --agent)
@@ -345,6 +347,11 @@ while [ "$#" -gt 0 ]; do
         --state)
             [ "$#" -lt 2 ] && usage && exit 1
             state="$2"
+            shift 2
+            ;;
+        --if-state)
+            [ "$#" -lt 2 ] && usage && exit 1
+            if_state="$2"
             shift 2
             ;;
         *)
@@ -366,8 +373,21 @@ case "$state" in
         exit 1
         ;;
 esac
+case "$if_state" in
+    ""|running|needs-input|done|off) ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
 
 pane_id=$(resolve_target_pane "$agent")
+
+# --if-state: leave everything alone unless the pane is currently in that state.
+if [ -n "$if_state" ]; then
+    current_state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")
+    [ "${current_state:-off}" = "$if_state" ] || exit 0
+fi
 window_id=$(tmux display-message -p -t "$pane_id" '#{window_id}')
 active_window_id=$(tmux display-message -p '#{window_id}')
 active_pane_id=$(tmux display-message -p '#{pane_id}')
