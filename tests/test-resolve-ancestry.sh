@@ -54,6 +54,13 @@ for mode in stale missing; do
             source_window=$(tmux_cmd display-message -p -t "$source" '#{window_id}')
             actual_style=$(get_window_option "$source_window" window-status-style)
             [ "$actual_style" = "$expected_style" ] || fail "incorrect source window style: '$actual_style'"
+            if [ "$state" = needs-input ]; then
+                tmux_cmd select-window -t "$source_window"
+                tmux_cmd run-shell "\"$REPO_ROOT/scripts/pane-focus-in.sh\" \"$source\" \"$source_window\""
+                [ "$(get_env "TMUX_AGENT_PANE_${source}_STATE")" = needs-input ] || fail "focus must preserve Codex needs-input state"
+                [ "$(get_window_option "$source_window" window-status-current-style)" = "$expected_style" ] || fail "focus must preserve Codex needs-input color"
+                tmux_cmd select-window -t "$WIN"
+            fi
             assert_empty "$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")" "unrelated pane must never receive state"
             assert_empty "$(get_window_option "$WIN" window-status-style)" "unrelated window must never receive styling"
         done

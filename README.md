@@ -26,7 +26,10 @@ Each state can change:
 - Window title background and foreground
 - Status bar icon (per-agent, e.g. `claude=🤖`, `codex=🧠`)
 
-States reset when you focus the pane/window, or on the next transition. Window titles are coloured only for windows other than the one you are looking at, unless `@agent-indicator-style-active-window` is on.
+Done indicators reset when you focus the pane/window. Needs-input indicators stay visible until
+the agent reports its next state; focusing a permission prompt does not answer it. Window titles
+are coloured only for windows other than the one you are looking at, unless
+`@agent-indicator-style-active-window` is on.
 
 ## Features
 

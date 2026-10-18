@@ -96,13 +96,7 @@ fi
 done_window_done_key="TMUX_AGENT_WINDOW_${done_window}_DONE"
 done_window_border_key="TMUX_AGENT_WINDOW_${done_window}_ORIG_ACTIVE_BORDER_STYLE"
 
-# Needs-input visuals are cleared when focus returns to the source pane/window.
-if [ "$state" = "needs-input" ]; then
-    restore_window_title_style "$window_id"
-    tmux set-option -p -t "$pane_id" window-style "bg=default"
-    restore_window_option "$window_id" "pane-active-border-style" "$window_border_key"
-fi
-
+# Focus acknowledges completed work; needs-input waits for an agent state transition.
 if [ "$window_done" = "1" ] || [ "$state" = "done" ] || [ "$done_marker" = "1" ]; then
     restore_window_title_style "$done_window"
     restore_window_option "$done_window" "pane-active-border-style" "$done_window_border_key"

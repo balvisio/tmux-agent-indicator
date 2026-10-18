@@ -42,7 +42,8 @@ It also checks that detached Codex hooks are ignored despite a valid, stale `TMU
 
 For live Codex checks, launch two fresh `codex --no-daemon` sessions in separate panes.
 Check `running`, `needs-input`, and `done` while a third window is selected: only the
-originating pane/window should change.
+originating pane/window should change. Focus a pending permission prompt and confirm its
+`needs-input` color remains until the agent reports its next state.
 
 Check live provider limits without the tmux cache:
 
@@ -90,22 +91,24 @@ tmux -L "$SOCK" run-shell "$PWD/scripts/pane-focus-in.sh \"$PANE\" \"$WIN\""
 tmux -L "$SOCK" show-window-options -vt "$WIN" | grep 'window-status'
 ```
 
-Window-switch title reset check:
+Done window-switch title reset check:
 
 ```bash
 tmux -L "$SOCK" new-window -d -t ai -n other
 OTHER_PANE="$(tmux -L "$SOCK" display-message -p -t ai:other.0 '#{pane_id}')"
 OTHER_WIN="$(tmux -L "$SOCK" display-message -p -t ai:other.0 '#{window_id}')"
-tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --agent claude --state needs-input"
+tmux -L "$SOCK" select-window -t "$OTHER_WIN"
+tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --agent claude --state done"
 tmux -L "$SOCK" run-shell "$PWD/scripts/pane-focus-in.sh \"$OTHER_PANE\" \"$OTHER_WIN\""
 tmux -L "$SOCK" show-window-options -vt "$WIN" | grep 'window-status'
 ```
 
-Window-switch title reset assertion (fails if style clears before returning to source window, or does not clear after returning):
+Done window-switch title reset assertion (fails if style clears before returning to source window, or does not clear after returning):
 
 ```bash
 set -euo pipefail
-tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --agent claude --state needs-input"
+tmux -L "$SOCK" select-window -t "$OTHER_WIN"
+tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --agent claude --state done"
 before_style="$(tmux -L "$SOCK" show-window-option -v -t "$WIN" window-status-style 2>/dev/null || true)"
 before_current_style="$(tmux -L "$SOCK" show-window-option -v -t "$WIN" window-status-current-style 2>/dev/null || true)"
 [ -n "$before_style" ] || { echo "FAIL: window-status-style was not applied before switch"; exit 1; }
@@ -117,6 +120,7 @@ while_away_current_style="$(tmux -L "$SOCK" show-window-option -v -t "$WIN" wind
 [ -n "$while_away_style" ] || { echo "FAIL: window-status-style cleared before returning to source window"; exit 1; }
 [ -n "$while_away_current_style" ] || { echo "FAIL: window-status-current-style cleared before returning to source window"; exit 1; }
 
+tmux -L "$SOCK" select-window -t "$WIN"
 tmux -L "$SOCK" run-shell "$PWD/scripts/pane-focus-in.sh \"$PANE\" \"$WIN\""
 after_return_style="$(tmux -L "$SOCK" show-window-option -v -t "$WIN" window-status-style 2>/dev/null || true)"
 after_return_current_style="$(tmux -L "$SOCK" show-window-option -v -t "$WIN" window-status-current-style 2>/dev/null || true)"
@@ -186,7 +190,8 @@ rm -f /tmp/agent-indicator.out
    - `running/needs-input/done` apply only configured non-empty properties.
    - `off` resets pane background, border style, and window title style.
    - With `@agent-indicator-animation-enabled on`, running state animates the status indicator.
-   - Switching away keeps title styling; it clears when you focus the source pane/window again (`needs-input` and `done`).
+   - `needs-input` title, pane, and border styling survives focus until the agent reports its next state.
+   - `done` title styling clears when you focus the source pane/window again.
    - With `@agent-indicator-reset-on-focus on`, done pane styling clears when focusing pane/window.
 4. Validate empty-value semantics (`set -g @agent-indicator-done-bg ''` should skip background changes).
 5. Validate status icon appears when agent state/process is active.
