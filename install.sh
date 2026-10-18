@@ -322,7 +322,7 @@ if [ "$INSTALL_CODEX" = true ] || [ "$UNINSTALL_CODEX" = true ]; then
 
     if [ "$INSTALL_CODEX" = true ]; then
         echo "Codex detected"
-        echo "  Hooks -> $CODEX_HOOKS (UserPromptSubmit, PermissionRequest, Stop)"
+        echo "  Hooks -> $CODEX_HOOKS (UserPromptSubmit, PermissionRequest, PostToolUse, Interrupt, SessionEnd, Stop)"
         echo "  Next: run /hooks in Codex and trust the tmux-agent-indicator hooks"
     fi
 

@@ -50,6 +50,20 @@ register_focus_hooks() {
     register_hook_once "session-window-changed" "$hook_command"
 }
 
+register_interrupt_binding() {
+    local script="$CURRENT_DIR/scripts/pane-interrupt.sh"
+    local existing
+    existing=$(tmux list-keys -T root 2>/dev/null | awk '
+        { for (i = 2; i < NF; i++) if ($i == "-T") {
+            if ($(i + 1) == "root" && $(i + 2) == "C-c") print
+            break
+        } }' || true)
+    # Preserve custom bindings; reload only our own binding.
+    if [ -z "$existing" ] || [[ "$existing" == *"$script"* ]]; then
+        tmux bind-key -n C-c send-keys C-c '\;' run-shell "\"$script\" \"#{pane_id}\""
+    fi
+}
+
 main() {
     tmux set-environment -g TMUX_AGENT_INDICATOR_DIR "$CURRENT_DIR"
     update_tmux_option "status-right"
@@ -59,6 +73,7 @@ main() {
     update_tmux_option "@minimal-tmux-status-right-extra"
     update_tmux_option "@minimal-tmux-status-left-extra"
     register_focus_hooks
+    register_interrupt_binding
     local session_script="$CURRENT_DIR/scripts/session-changed.sh"
     register_hook_once "client-session-changed" "run-shell \"$session_script\""
 }

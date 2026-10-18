@@ -31,6 +31,7 @@ Run individual checks:
 ./tests/test-if-state.sh
 ./tests/test-resolve-by-process.sh
 ./tests/test-resolve-ancestry.sh
+./tests/test-cancellation-hooks.sh
 ./tests/test-notification-command.sh
 ./tests/test-running-animation.sh
 ```
@@ -44,6 +45,10 @@ For live Codex checks, launch two fresh `codex --no-daemon` sessions in separate
 Check `running`, `needs-input`, and `done` while a third window is selected: only the
 originating pane/window should change. Focus a pending permission prompt and confirm its
 `needs-input` color remains until the agent reports its next state.
+
+Cancel an active turn with Ctrl+C in both agents and confirm its state and colors clear.
+Codex requires the new `Interrupt` hook to be trusted in `/hooks`; Claude uses the plugin's
+Ctrl+C binding. Exiting either agent must also clear state through `SessionEnd`.
 
 Check live provider limits without the tmux cache:
 

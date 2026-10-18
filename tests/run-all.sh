@@ -16,6 +16,7 @@ tests=(
     "$ROOT_DIR/tests/test-if-state.sh"
     "$ROOT_DIR/tests/test-resolve-by-process.sh"
     "$ROOT_DIR/tests/test-resolve-ancestry.sh"
+    "$ROOT_DIR/tests/test-cancellation-hooks.sh"
     "$ROOT_DIR/tests/test-notification-command.sh"
     "$ROOT_DIR/tests/test-running-animation.sh"
 )

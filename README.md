@@ -58,8 +58,8 @@ bash ~/.tmux/plugins/tmux-agent-indicator/setup.sh
 ```
 
 This installs files to `~/.tmux/plugins/tmux-agent-indicator` and updates:
-- `~/.claude/settings.json` hooks for Claude (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`)
-- `~/.codex/hooks.json` hooks for Codex (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`)
+- `~/.claude/settings.json` hooks for Claude (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, `SessionEnd`)
+- `~/.codex/hooks.json` hooks for Codex (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt`, `SessionEnd`)
 - `~/.config/opencode/plugins/` plugin for OpenCode
 
 After installing Codex hooks, run `/hooks` in Codex and trust the tmux-agent-indicator hook definitions before they can run.
@@ -430,8 +430,18 @@ They map:
 - `PostToolUse` -> `running`, only while the pane is `needs-input` (an answered permission prompt or
   question goes back to `running` instead of staying `needs-input` until `Stop`)
 - `Stop` -> `done`
+- `SessionEnd` -> `off`
+- Codex `Interrupt` -> `off` when an active turn is canceled
 
 Codex hooks must be reviewed and trusted with `/hooks` before they can run.
+
+Claude does not fire `Stop` when a turn is interrupted. The tmux plugin binds Ctrl+C to forward
+the key normally, then clear `running` or `needs-input` state in that Claude pane. It preserves
+custom Ctrl+C bindings; if you have one, append
+`run-shell '~/.tmux/plugins/tmux-agent-indicator/scripts/pane-interrupt.sh "#{pane_id}"'`
+after its key-forwarding command. This fallback covers Ctrl+C sent through tmux, not cancellation
+through Escape, another client, or an external signal. Codex uses its native
+[Interrupt hook](https://learn.chatgpt.com/docs/hooks#interrupt).
 
 ## OpenCode Plugin
 

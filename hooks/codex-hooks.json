@@ -34,6 +34,30 @@
         ]
       }
     ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-state.sh --agent codex --state off",
+            "timeout": 3,
+            "statusMessage": "tmux: codex interrupted"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-state.sh --agent codex --state off",
+            "timeout": 3,
+            "statusMessage": "tmux: codex session ended"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
