@@ -29,9 +29,20 @@ Run individual checks:
 ./tests/test-focus-reset-window-change.sh
 ./tests/test-style-active-window.sh
 ./tests/test-if-state.sh
+./tests/test-resolve-by-process.sh
+./tests/test-resolve-ancestry.sh
 ./tests/test-notification-command.sh
 ./tests/test-running-animation.sh
 ```
+
+The ancestry test launches hooks inside two separate panes while an unrelated window stays selected.
+It checks all four states with both a missing `TMUX_PANE` and a stale value naming the unrelated pane.
+The originating windows must receive the updates and the unrelated window must remain unchanged.
+It also checks that detached Codex hooks are ignored despite a valid, stale `TMUX_PANE`.
+
+For live Codex checks, launch two fresh `codex --no-daemon` sessions in separate panes.
+Check `running`, `needs-input`, and `done` while a third window is selected: only the
+originating pane/window should change.
 
 Check live provider limits without the tmux cache:
 

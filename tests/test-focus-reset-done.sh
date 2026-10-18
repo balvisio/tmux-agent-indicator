@@ -24,7 +24,13 @@ first_done_pane="$(tmux_cmd split-window -d -P -F '#{pane_id}' -t "$PANE")"
 second_done_pane="$(tmux_cmd split-window -d -P -F '#{pane_id}' -t "$PANE")"
 tmux_cmd set-option -g @agent-indicator-done-bg colour22
 tmux_cmd run-shell "TMUX_PANE=$first_done_pane \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state done"
-tmux_cmd run-shell "TMUX_PANE=$second_done_pane \"$ROOT_DIR/scripts/agent-state.sh\" --agent codex --state done"
+# Codex --no-daemon hooks must descend from their pane.
+tmux_cmd send-keys -t "$second_done_pane" -l "\"$ROOT_DIR/scripts/agent-state.sh\" --agent codex --state done"
+tmux_cmd send-keys -t "$second_done_pane" Enter
+for _ in $(seq 1 100); do
+    [ "$(tmux_cmd show-options -pv -p -t "$second_done_pane" window-style)" = "bg=colour22" ] && break
+    sleep 0.05
+done
 
 second_style_before="$(tmux_cmd show-options -pv -p -t "$second_done_pane" window-style)"
 [ "$second_style_before" = "bg=colour22" ] || fail "second done pane style should be applied: $second_style_before"

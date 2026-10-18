@@ -228,60 +228,38 @@ stop_animation() {
     tmux set-environment -gu TMUX_AGENT_ANIMATION_FRAME 2>/dev/null || true
 }
 
+# Codex --no-daemon hooks descend from their pane's starting process (pane_pid).
+# TMUX_PANE can be missing or stale, so find that process in the hook's ancestry.
+resolve_pane_by_ancestry() {
+    local panes cur match hops=0
+    panes=$(tmux list-panes -a -F '#{pane_pid} #{pane_id}' 2>/dev/null || true)
+    [ -n "$panes" ] || return 0
+    cur=$$
+    while [ "$hops" -lt 40 ]; do
+        case "$cur" in ""|0|1|*[!0-9]*) break ;; esac
+        match=$(printf '%s\n' "$panes" | awk -v p="$cur" '$1 == p { print $2; exit }')
+        if [ -n "$match" ]; then
+            printf '%s\n' "$match"
+            return 0
+        fi
+        cur=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]' || true)
+        hops=$((hops + 1))
+    done
+    return 0
+}
+
 resolve_target_pane() {
     local agent="$1"
-    local pane=""
-    local agent_active_key="TMUX_AGENT_ACTIVE_PANE_${agent}"
-    local mapped_pane
-    local running_candidate=""
-    local done_candidate=""
-    local line pane_candidate state_candidate
 
+    if [ "$agent" = codex ]; then
+        resolve_pane_by_ancestry
+        return
+    fi
+
+    # Other agents supply their pane directly (Claude does this).
     if [ -n "${TMUX_PANE:-}" ] && pane_exists "$TMUX_PANE"; then
-        pane="$TMUX_PANE"
+        printf '%s\n' "$TMUX_PANE"
     fi
-
-    if [ -z "$pane" ]; then
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            pane_candidate="${line#TMUX_AGENT_PANE_}"
-            pane_candidate="${pane_candidate%%_AGENT=*}"
-            if ! pane_exists "$pane_candidate"; then
-                continue
-            fi
-            state_candidate=$(tmux_get_env "TMUX_AGENT_PANE_${pane_candidate}_STATE")
-            case "$state_candidate" in
-                running|needs-input)
-                    running_candidate="$pane_candidate"
-                    break
-                    ;;
-                done)
-                    if [ -z "$done_candidate" ]; then
-                        done_candidate="$pane_candidate"
-                    fi
-                    ;;
-            esac
-        done < <(tmux show-environment -g | grep "^TMUX_AGENT_PANE_.*_AGENT=${agent}$" || true)
-
-        if [ -n "$running_candidate" ]; then
-            pane="$running_candidate"
-        elif [ -n "$done_candidate" ]; then
-            pane="$done_candidate"
-        fi
-    fi
-
-    if [ -z "$pane" ]; then
-        mapped_pane=$(tmux_get_env "$agent_active_key")
-        if pane_exists "$mapped_pane"; then
-            pane="$mapped_pane"
-        fi
-    fi
-
-    if [ -z "$pane" ]; then
-        pane=$(tmux display-message -p '#{pane_id}')
-    fi
-
-    printf '%s\n' "$pane"
 }
 
 notify_state_change() {
@@ -382,6 +360,11 @@ case "$if_state" in
 esac
 
 pane_id=$(resolve_target_pane "$agent")
+if [ -z "$pane_id" ]; then
+    # No single pane owns this state (the agent is not running here, or several of its kind are):
+    # leave every window as it is rather than colour the wrong one.
+    exit 0
+fi
 
 # --if-state: leave everything alone unless the pane is currently in that state.
 if [ -n "$if_state" ]; then

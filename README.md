@@ -61,6 +61,9 @@ This installs files to `~/.tmux/plugins/tmux-agent-indicator` and updates:
 
 After installing Codex hooks, run `/hooks` in Codex and trust the tmux-agent-indicator hook definitions before they can run.
 
+**Codex must run with `codex --no-daemon` for state indicators to work.** The shared daemon's hooks
+cannot identify their originating tmux pane.
+
 Integration uninstall options:
 
 ```bash
@@ -384,6 +387,22 @@ To integrate any agent that does not have built-in hook support, call `agent-sta
 ```
 
 `--state off` always resets pane background and border immediately.
+
+Codex requires `codex --no-daemon`. Its hooks follow their process ancestry to the originating
+tmux pane, supporting multiple Codex sessions even when `TMUX_PANE` is missing or stale.
+Hooks without a pane ancestor are ignored. Other agents use `TMUX_PANE`.
+
+To make this the default when typing `codex`, add this alias to your shell startup file
+(`~/.bash_profile` for Bash login shells, `~/.bashrc` for other interactive Bash shells,
+or `~/.zshrc` for Zsh), then open a new shell:
+
+```bash
+alias codex='codex --no-daemon'
+```
+
+Setting `[features] daemon_auto_start = false` alone is insufficient: Codex can still connect to
+an existing daemon. Scripts must pass `--no-daemon` explicitly because they do not use interactive
+aliases. See the [Codex CLI reference](https://learn.chatgpt.com/docs/cli/reference).
 
 `--if-state <state>` makes the call conditional: nothing happens unless the pane is currently in that
 state (`off` = no state recorded). The `PostToolUse` hooks use it to return from `needs-input`
