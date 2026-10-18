@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import select
 import signal
+import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -36,9 +38,9 @@ def main():
         tmux("set", "-g", "@agent-indicator-notification-enabled", "off")
         tmux("set", "-g", "@agent-indicator-style-active-window", "on")
 
-        def update(state="needs-input"):
+        def update(state="needs-input", *extra):
             return subprocess.run(
-                [str(ROOT / "scripts/agent-state.sh"), "--agent", "claude", "--state", state],
+                [str(ROOT / "scripts/agent-state.sh"), "--agent", "claude", "--state", state, *extra],
                 env=inside, text=True, capture_output=True, timeout=5,
             )
 
@@ -85,19 +87,61 @@ esac
             started = time.monotonic()
             blocked = update()
             elapsed = time.monotonic() - started
-            assert blocked.returncode == 75, (blocked.returncode, blocked.stderr)
+            assert blocked.returncode == 0, (blocked.returncode, blocked.stderr)
             assert 1.5 <= elapsed < 4, elapsed
-            assert "state lock busy" in blocked.stderr
-            assert not tmux("show-environment", "-g").count(f"TMUX_AGENT_PANE_{pane}_STATE="), "timed-out hook mutated state"
-            print("PASS: contention has a bounded wait and cannot mutate state without the lock", flush=True)
+            assert not tmux("show-environment", "-g").count(f"TMUX_AGENT_PANE_{pane}_STATE="), "queued hook mutated state before acquiring the lock"
+            print("PASS: contention returns promptly with the update still pending", flush=True)
 
             owner.kill()
             owner.wait(timeout=3)
             os.kill(children[-1], 0)  # The background child still has descriptor 9 open.
-            recovered = update()
-            assert recovered.returncode == 0, recovered.stderr
-            assert tmux("show-options", "-wqv", "@agent-indicator-state") == "needs-input"
+            for _ in range(100):
+                if tmux("show-options", "-wqv", "@agent-indicator-state") == "needs-input":
+                    break
+                time.sleep(0.05)
+            assert tmux("show-options", "-wqv", "@agent-indicator-state") == "needs-input", "queued event was lost"
+            assert not list(Path(str(lock_file) + ".queue").iterdir())
             print("PASS: SIGKILL releases the lock even while a background child survives", flush=True)
+
+            # Conditional transitions must follow earlier queued events, not race them.
+            assert update("off").returncode == 0
+            owner = held()
+            assert update("needs-input").returncode == 0
+            assert update("running", "--if-state", "needs-input").returncode == 0
+            owner.stdin.write("finish\n")
+            owner.stdin.flush()
+            owner.wait(timeout=3)
+            for _ in range(100):
+                if tmux("show-options", "-wqv", "@agent-indicator-state") == "running":
+                    break
+                time.sleep(0.05)
+            assert tmux("show-options", "-wqv", "@agent-indicator-state") == "running", "queued conditional events ran out of order"
+            print("PASS: detached retries preserve transition order and conditional updates", flush=True)
+
+            # A detached Codex hook cannot rediscover ancestry; it must retain the
+            # pane resolved before returning to its runner.
+            assert update("off").returncode == 0
+            owner = held()
+            completed = Path(directory) / "codex-returned"
+            command = "env -u TMUX_PANE " + shlex.join([
+                str(ROOT / "scripts/agent-state.sh"), "--agent", "codex", "--state", "done",
+            ]) + " && touch " + shlex.quote(str(completed))
+            tmux("send-keys", "-t", pane, "-l", command)
+            tmux("send-keys", "-t", pane, "Enter")
+            for _ in range(100):
+                if completed.exists():
+                    break
+                time.sleep(0.05)
+            assert completed.exists(), "Codex hook did not return while contended"
+            owner.stdin.write("finish\n")
+            owner.stdin.flush()
+            owner.wait(timeout=3)
+            for _ in range(100):
+                if tmux("show-options", "-wqv", "@agent-indicator-state") == "done":
+                    break
+                time.sleep(0.05)
+            assert tmux("show-options", "-wqv", "@agent-indicator-state") == "done", "deferred Codex hook lost its pane"
+            print("PASS: deferred Codex updates retain their original pane", flush=True)
 
             # Explicit release must work before the writer and its children exit.
             owner = held("unlock")
@@ -134,6 +178,14 @@ esac
         subprocess.run(["tmux", "-L", socket, "kill-server"], env=environment, capture_output=True)
         # Every test writer has exited and the test server is gone; no waiters remain.
         if lock_file is not None:
+            queue = Path(str(lock_file) + ".queue")
+            if queue.exists():
+                for ticket in queue.iterdir():
+                    try:
+                        os.kill(int(ticket.read_text()), signal.SIGKILL)
+                    except (ValueError, ProcessLookupError, FileNotFoundError):
+                        pass
+                shutil.rmtree(queue)
             lock_file.unlink(missing_ok=True)
 
 

@@ -235,7 +235,8 @@ retained exited panes (`remain-on-exit`), and resetting the published state.
 
 ## State lock recovery
 
-`test-state-lock.py` holds the real writer lock on an isolated tmux server. It verifies that a blocked
-hook exits after the two-second wait without changing pane state, then kills the owner with SIGKILL
-and confirms a real state hook succeeds while the owner's background child remains alive. It also
-checks explicit unlock before process exit and serialized writes from concurrent processes.
+`test-state-lock.py` holds the real writer lock on an isolated tmux server. A blocked hook returns
+after two seconds with its update still queued. Killing the owner with SIGKILL must apply that update
+automatically, even while the owner's background child remains alive. Queued conditional updates
+must run in arrival order. The test also covers explicit unlock before process exit and concurrent
+writers. The ancestry tests verify that Codex continues targeting its own pane.

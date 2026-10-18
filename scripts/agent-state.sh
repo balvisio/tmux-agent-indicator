@@ -16,8 +16,12 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/state-lib.sh"
-lock_agent_state "$@"
-shift
+locked=false
+if [ "${1:-}" = --agent-state-lock-held ]; then
+    locked=true
+    shift
+fi
+original_args=("$@")
 
 # Codex --no-daemon hooks descend from their pane's starting process (pane_pid).
 # TMUX_PANE can be missing or stale, so find that process in the hook's ancestry.
@@ -150,15 +154,28 @@ case "$if_state" in
         ;;
 esac
 
-pane_id=$(resolve_target_pane "$agent")
+if [ "$locked" = true ]; then
+    pane_id="$TMUX_AGENT_EVENT_PANE"
+else
+    pane_id=$(resolve_target_pane "$agent")
+fi
 if [ -z "$pane_id" ]; then
     # No single pane owns this state (the agent is not running here, or several of its kind are):
     # leave every window as it is rather than colour the wrong one.
     exit 0
 fi
 
-# The launcher holds the server state lock across this entire transition.
+if [ "$locked" = false ]; then
+    # Resolve Codex ancestry while the hook still belongs to its original process
+    # tree. A contended writer may continue after its hook runner has returned.
+    export TMUX_AGENT_EVENT_PANE="$pane_id"
+    TMUX_AGENT_EVENT_PANE_PID="$(tmux display-message -p -t "$pane_id" '#{pane_pid}')"
+    export TMUX_AGENT_EVENT_PANE_PID
+    lock_agent_state "${original_args[@]}"
+fi
+# Ignore deferred events if the pane was closed or replaced while they waited.
 pane_exists "$pane_id" || exit 0
+[ "$(tmux display-message -p -t "$pane_id" '#{pane_pid}:#{pane_dead}')" = "$TMUX_AGENT_EVENT_PANE_PID:0" ] || exit 0
 if [ -n "$if_state" ]; then
     current_state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")
     [ "${current_state:-off}" = "$if_state" ] || exit 0

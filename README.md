@@ -61,7 +61,10 @@ completion. Run `scripts/window-state.sh` to reconcile every window without chan
 
 State writers use a process-owned file lock scoped to the tmux server. The operating system releases
 it when the writer exits, including a forced kill; background children do not inherit the lock.
-A writer waits at most two seconds for contention, then exits with status 75 without changing state.
+Writers acquire the lock in queue order. After two seconds of contention, a hook returns successfully
+and its detached retry keeps waiting; the update is applied when earlier writers finish. This keeps
+agent hooks responsive without dropping or reordering state transitions. Codex resolves its pane
+before detaching, and queued events are discarded if that pane was replaced or the server stopped.
 Full sweeps lock one window update at a time so hooks can run between updates. The empty lock file
 next to the tmux socket is intentional and must not be deleted while that server has active writers.
 
