@@ -62,7 +62,7 @@ tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --age
 Core assertions:
 
 ```bash
-tmux -L "$SOCK" show-window-options -vt "$WIN" | rg 'pane-active-border-style|window-status'
+tmux -L "$SOCK" show-window-options -vt "$WIN" | grep -E 'pane-active-border-style|window-status'
 tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/indicator.sh\" > /tmp/agent-indicator.out"
 cat /tmp/agent-indicator.out
 ```
@@ -72,7 +72,7 @@ Focus-reset check:
 ```bash
 tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --agent claude --state done"
 tmux -L "$SOCK" run-shell "$PWD/scripts/pane-focus-in.sh \"$PANE\" \"$WIN\""
-tmux -L "$SOCK" show-window-options -vt "$WIN" | rg 'window-status'
+tmux -L "$SOCK" show-window-options -vt "$WIN" | grep 'window-status'
 ```
 
 Window-switch title reset check:
@@ -83,7 +83,7 @@ OTHER_PANE="$(tmux -L "$SOCK" display-message -p -t ai:other.0 '#{pane_id}')"
 OTHER_WIN="$(tmux -L "$SOCK" display-message -p -t ai:other.0 '#{window_id}')"
 tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/agent-state.sh\" --agent claude --state needs-input"
 tmux -L "$SOCK" run-shell "$PWD/scripts/pane-focus-in.sh \"$OTHER_PANE\" \"$OTHER_WIN\""
-tmux -L "$SOCK" show-window-options -vt "$WIN" | rg 'window-status'
+tmux -L "$SOCK" show-window-options -vt "$WIN" | grep 'window-status'
 ```
 
 Window-switch title reset assertion (fails if style clears before returning to source window, or does not clear after returning):
@@ -132,7 +132,7 @@ first_frame="$(tmux -L "$SOCK" show-environment -g TMUX_AGENT_ANIMATION_FRAME 2>
 
 tmux -L "$SOCK" run-shell "TMUX_PANE=$PANE \"$PWD/scripts/indicator.sh\" > /tmp/agent-indicator.out"
 indicator_output="$(cat /tmp/agent-indicator.out)"
-printf '%s' "$indicator_output" | rg -q '━' || { echo "FAIL: indicator bar is missing while running"; exit 1; }
+printf '%s' "$indicator_output" | grep -q '━' || { echo "FAIL: indicator bar is missing while running"; exit 1; }
 
 changed=0
 for _ in $(seq 1 20); do

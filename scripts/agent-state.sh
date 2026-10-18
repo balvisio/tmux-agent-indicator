@@ -260,7 +260,7 @@ resolve_target_pane() {
                     fi
                     ;;
             esac
-        done < <(tmux show-environment -g | rg "^TMUX_AGENT_PANE_.*_AGENT=${agent}$" || true)
+        done < <(tmux show-environment -g | grep "^TMUX_AGENT_PANE_.*_AGENT=${agent}$" || true)
 
         if [ -n "$running_candidate" ]; then
             pane="$running_candidate"
