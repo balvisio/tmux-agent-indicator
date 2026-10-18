@@ -9,6 +9,7 @@ lock_agent_state() {
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         exec python3 "$script_dir/state-lock.py" "$0" "$@"
     fi
+    prune_pane_states
 }
 
 unlock_agent_state() {
@@ -21,9 +22,34 @@ clear_pane_state() {
     agent=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_AGENT")
     tmux_unset_env "TMUX_AGENT_PANE_${pane_id}_STATE"
     tmux_unset_env "TMUX_AGENT_PANE_${pane_id}_AGENT"
+    tmux_unset_env "TMUX_AGENT_PANE_${pane_id}_PID"
     if [ -n "$agent" ] && [ "$(tmux_get_env "TMUX_AGENT_ACTIVE_PANE_${agent}")" = "$pane_id" ]; then
         tmux_unset_env "TMUX_AGENT_ACTIVE_PANE_${agent}"
     fi
+}
+
+# Pane IDs survive respawn; recorded states belong to the process that emitted
+# them. Prune under the writer lock before applying hooks, focus, or sweeps.
+prune_pane_states() {
+    local panes line pane_id recorded_pid current_pid dead window_id affected=""
+    panes=$(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_dead} #{window_id}')
+    while IFS= read -r line; do
+        pane_id="${line#TMUX_AGENT_PANE_}"
+        pane_id="${pane_id%%_STATE=*}"
+        recorded_pid=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_PID")
+        current_pid=""; dead=""; window_id=""
+        read -r current_pid dead window_id < <(printf '%s\n' "$panes" | awk -v p="$pane_id" '$1 == p { print $2, $3, $4; exit }') || true
+        if [ -z "$recorded_pid" ] || [ "$current_pid" != "$recorded_pid" ] || [ "$dead" != 0 ]; then
+            clear_pane_state "$pane_id"
+            if [ -n "$window_id" ]; then
+                reset_pane_style "$pane_id" || true
+                affected="$affected $window_id"
+            fi
+        fi
+    done < <(tmux show-environment -g | grep '^TMUX_AGENT_PANE_.*_STATE=' || true)
+    for window_id in $affected; do
+        render_window_state "$window_id"
+    done
 }
 
 # Only live panes participate. A closed or moved pane cannot keep its old window colored.

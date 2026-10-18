@@ -155,6 +155,7 @@ case "$if_state" in
 esac
 
 if [ "$locked" = true ]; then
+    prune_pane_states
     pane_id="$TMUX_AGENT_EVENT_PANE"
 else
     pane_id=$(resolve_target_pane "$agent")
@@ -194,6 +195,7 @@ clear_pane_state "$pane_id"
 if [ "$state" != off ]; then
     tmux_set_env "TMUX_AGENT_PANE_${pane_id}_STATE" "$state"
     tmux_set_env "TMUX_AGENT_PANE_${pane_id}_AGENT" "$agent"
+    tmux_set_env "TMUX_AGENT_PANE_${pane_id}_PID" "$TMUX_AGENT_EVENT_PANE_PID"
     tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
     state_bg=$(tmux_get_option_or_default "@agent-indicator-${state}-bg" "$(default_state_bg "$state")")
     if ! is_enabled "$(tmux_get_option_or_default @agent-indicator-background-enabled on)"; then

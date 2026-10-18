@@ -43,7 +43,10 @@ When several panes share a window, its title and border use the highest-priority
 
 This applies to any number of panes, regardless of hook arrival order. For example, done + running
 stays running, done + idle shows done, and needs-input + done stays needs-input. Canceling one agent
-clears only its pane. Moving or closing a pane recalculates the affected windows.
+clears only its pane. Moving or closing a pane recalculates the affected windows. State records also
+include the pane process ID. Exit hooks and reconciliation sweeps clear dead or replaced processes,
+even if tmux reuses the pane ID. Tmux does not emit a respawn hook; a forced respawn is cleaned up by
+the next state writer or `window-state.sh` sweep.
 
 The plugin publishes this result as the window option `@agent-indicator-state`. Menu-bar indicators
 should read that option instead of independently ranking pane states:

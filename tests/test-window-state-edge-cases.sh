@@ -42,6 +42,41 @@ for _ in $(seq 1 100); do
 done
 [ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'retained dead pane still contributes a state'
 pass 'pane exit removes its contribution even with remain-on-exit'
+assert_empty "$(get_env "TMUX_AGENT_PANE_${second}_STATE")" 'dead pane state must be deleted'
+assert_empty "$(get_env "TMUX_AGENT_PANE_${second}_PID")" 'dead pane identity must be deleted'
+# Respawning the same pane ID must not revive its former state.
+tmux_cmd respawn-pane -k -t "$second" '/bin/bash --noprofile --norc'
+tmux_cmd run-shell "\"$ROOT_DIR/scripts/window-state.sh\" \"$WIN\""
+[ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'respawn revived dead pane state'
+# Forced replacement without an intermediate dead-pane observation also clears
+# old state, while preserving another waiting agent in the same window.
+run_state needs-input
+tmux_cmd run-shell "TMUX_PANE=$second \"$REPO_ROOT/scripts/agent-state.sh\" --agent claude --state needs-input"
+old_pid=$(get_env "TMUX_AGENT_PANE_${second}_PID")
+assert_non_empty "$old_pid" 'state must record the owning pane process'
+tmux_cmd respawn-pane -k -t "$second" '/bin/bash --noprofile --norc'
+tmux_cmd run-shell "\"$ROOT_DIR/scripts/window-state.sh\" \"$WIN\""
+for _ in $(seq 1 100); do
+    [ -z "$(get_env "TMUX_AGENT_PANE_${second}_STATE")" ] && break
+    sleep 0.05
+done
+assert_empty "$(get_env "TMUX_AGENT_PANE_${second}_STATE")" 'reconciliation retained old waiting state'
+[ "$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")" = needs-input ] || fail 'respawn cleared a waiting sibling'
+[ "$(get_window_option "$WIN" @agent-indicator-state)" = needs-input ] || fail 'respawn hid a waiting sibling'
+run_state off
+[ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'replacement shell must contribute no state'
+# New events in the replacement pane still work.
+tmux_cmd run-shell "TMUX_PANE=$second \"$REPO_ROOT/scripts/agent-state.sh\" --agent claude --state running"
+[ "$(get_env "TMUX_AGENT_PANE_${second}_PID")" != "$old_pid" ] || fail 'new hook retained old process identity'
+[ "$(get_window_option "$WIN" @agent-indicator-state)" = running ] || fail 'new hook in replacement pane was ignored'
+tmux_cmd respawn-window -k -t "$WIN" '/bin/bash --noprofile --norc'
+tmux_cmd run-shell "\"$ROOT_DIR/scripts/window-state.sh\" \"$WIN\""
+for _ in $(seq 1 100); do
+    [ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] && break
+    sleep 0.05
+done
+[ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'respawn-window retained state'
+pass 'pane and window respawn clear stale state without erasing sibling work'
 tmux_cmd run-shell "\"$REPO_ROOT/scripts/reset_all.sh\""
 [ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'reset did not publish idle'
 pass 'reset clears the published aggregate state'

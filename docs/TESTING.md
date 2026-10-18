@@ -240,3 +240,9 @@ after two seconds with its update still queued. Killing the owner with SIGKILL m
 automatically, even while the owner's background child remains alive. Queued conditional updates
 must run in arrival order. The test also covers explicit unlock before process exit and concurrent
 writers. The ancestry tests verify that Codex continues targeting its own pane.
+
+## Pane replacement
+
+`test-window-state-edge-cases.sh` checks retained dead panes, `respawn-pane -k`, and
+`respawn-window -k`, followed by reconciliation. Old state and its process identity must disappear. A waiting sibling must
+stay waiting, and a new hook in the replacement pane must be accepted under its new process ID.
