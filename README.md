@@ -56,8 +56,9 @@ tmux list-windows -a -F '#{window_id} #{@agent-indicator-state}'
 ```
 
 Use `@agent-indicator-style-active-window on` and configure title colors for each state when mirroring
-window colors in another UI. The plugin does not install an OS menu-bar integration. An integration
-that supplies an idle color can call `scripts/window-state.sh --idle-style <window_id> 'bg=blue,fg=white'`
+window colors in another UI. The plugin does not install an OS menu-bar integration; the optional
+[Hammerspoon companion](integrations/hammerspoon/README.md) reads the actual title styles for its dot
+colors, including custom palettes. An integration that supplies an idle color can call `scripts/window-state.sh --idle-style <window_id> 'bg=blue,fg=white'`
 (or `__UNSET__` to remove its idle override). That command shares the state-update lock, preserves
 active colors, and reconciles the window. Polling it also repairs stale colors without acknowledging
 completion. Run `scripts/window-state.sh` to reconcile every window without changing pane states.

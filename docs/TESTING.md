@@ -22,6 +22,7 @@ Run individual checks:
 
 ```bash
 ./tests/test-agent-limits.sh
+./tests/test-hammerspoon-dots.py
 ./tests/test-state-lock.py
 ./tests/test-state-transitions.sh
 ./tests/test-indicator-output.sh
@@ -246,3 +247,11 @@ writers. The ancestry tests verify that Codex continues targeting its own pane.
 `test-window-state-edge-cases.sh` checks retained dead panes, `respawn-pane -k`, and
 `respawn-window -k`, followed by reconciliation. Old state and its process identity must disappear. A waiting sibling must
 stay waiting, and a new hook in the replacement pane must be accepted under its new process ID.
+
+## Menu-bar colors
+
+`test-hammerspoon-dots.py` uses Lua with a mock Hammerspoon API and an isolated tmux server. It checks
+named/indexed/RGB colors, actual current/inactive/inherited styles, remote probe output, palette-only
+redraws, and menu colors. SSH-only segments must keep excluding container agents, and changing a
+palette must not play state-change sounds. Install Lua to run this optional integration test; CI
+installs it and runs the test as part of the suite.

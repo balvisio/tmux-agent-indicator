@@ -45,7 +45,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes tmux
+          sudo apt-get install --yes tmux lua5.4
 
       - name: Run tests
         run: ./tests/run-all.sh
