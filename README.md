@@ -26,7 +26,7 @@ Each state can change:
 - Window title background and foreground
 - Status bar icon (per-agent, e.g. `claude=🤖`, `codex=🧠`)
 
-States reset when you focus the pane/window, or on the next transition.
+States reset when you focus the pane/window, or on the next transition. Window titles are coloured only for windows other than the one you are looking at, unless `@agent-indicator-style-active-window` is on.
 
 ## Features
 
@@ -183,6 +183,9 @@ set -g @agent-indicator-icons 'claude=🤖,codex=🧠,opencode=💻,default=🤖
 # Keep pane colors until you focus the pane (instead of clearing immediately)
 set -g @agent-indicator-reset-on-focus 'on'
 
+# Also colour the window title of the window you are currently in
+set -g @agent-indicator-style-active-window 'on'
+
 # Knight Rider animation while running
 set -g @agent-indicator-animation-enabled 'on'
 ```
@@ -230,6 +233,9 @@ set -g @agent-indicator-processes 'claude,codex,aider,cursor,opencode'
 
 # Keep pane colors until pane focus-in after done
 set -g @agent-indicator-reset-on-focus 'on'
+
+# Window-title styling for the active window too (default: only other windows)
+set -g @agent-indicator-style-active-window 'off'
 
 # Running animation in status indicator
 set -g @agent-indicator-animation-enabled 'off'

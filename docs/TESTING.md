@@ -26,6 +26,7 @@ Run individual checks:
 ./tests/test-indicator-output.sh
 ./tests/test-focus-reset-done.sh
 ./tests/test-window-title-reset.sh
+./tests/test-style-active-window.sh
 ./tests/test-running-animation.sh
 ```
 

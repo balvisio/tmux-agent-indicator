@@ -377,6 +377,8 @@ fi
 background_enabled=$(tmux_get_option_or_default "@agent-indicator-background-enabled" "on")
 border_enabled=$(tmux_get_option_or_default "@agent-indicator-border-enabled" "on")
 reset_on_focus=$(tmux_get_option_or_default "@agent-indicator-reset-on-focus" "on")
+# Window-title styling skips the window the user is looking at unless this is on.
+style_active_window=$(tmux_get_option_or_default "@agent-indicator-style-active-window" "off")
 
 state_key="TMUX_AGENT_PANE_${pane_id}_STATE"
 agent_key="TMUX_AGENT_PANE_${pane_id}_AGENT"
@@ -436,7 +438,7 @@ case "$state" in
             restore_active_border_style "$window_id"
         fi
 
-        if [ "$window_id" != "$active_window_id" ]; then
+        if [ "$window_id" != "$active_window_id" ] || is_enabled "$style_active_window"; then
             apply_window_title_style "$window_id" "$state_title_bg" "$state_title_fg"
         fi
         start_animation
@@ -478,7 +480,7 @@ case "$state" in
             restore_active_border_style "$window_id"
         fi
 
-        if [ "$window_id" != "$active_window_id" ]; then
+        if [ "$window_id" != "$active_window_id" ] || is_enabled "$style_active_window"; then
             apply_window_title_style "$window_id" "$state_title_bg" "$state_title_fg"
         fi
         notify_state_change "$agent" "$state" "$pane_id"
@@ -513,7 +515,7 @@ case "$state" in
             fi
         fi
 
-        if [ "$window_id" != "$active_window_id" ]; then
+        if [ "$window_id" != "$active_window_id" ] || is_enabled "$style_active_window"; then
             apply_window_title_style "$window_id" "$state_title_bg" "$state_title_fg" "done"
         fi
         notify_state_change "$agent" "$state" "$pane_id"
