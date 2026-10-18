@@ -74,6 +74,13 @@ main() {
     update_tmux_option "@minimal-tmux-status-left-extra"
     register_focus_hooks
     register_interrupt_binding
+    # Recompute both source and destination windows after panes move, close, or exit.
+    local state_script="$CURRENT_DIR/scripts/window-state.sh"
+    local state_command="run-shell -b \"$state_script \\\"#{hook_window}\\\"\""
+    register_hook_once "window-layout-changed" "$state_command"
+    register_hook_once "pane-exited" "$state_command"
+    register_hook_once "pane-died" "$state_command"
+    tmux run-shell -b "\"$state_script\""
     local session_script="$CURRENT_DIR/scripts/session-changed.sh"
     register_hook_once "client-session-changed" "run-shell \"$session_script\""
 }

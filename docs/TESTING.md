@@ -26,6 +26,8 @@ Run individual checks:
 ./tests/test-indicator-output.sh
 ./tests/test-focus-reset-done.sh
 ./tests/test-window-title-reset.sh
+./tests/test-window-state-priority.sh
+./tests/test-window-state-edge-cases.sh
 ./tests/test-focus-reset-window-change.sh
 ./tests/test-style-active-window.sh
 ./tests/test-if-state.sh
@@ -193,11 +195,11 @@ rm -f /tmp/agent-indicator.out
    `scripts/agent-state.sh --agent claude --state running|needs-input|done|off`.
 3. Confirm behavior:
    - `running/needs-input/done` apply only configured non-empty properties.
-   - `off` resets pane background, border style, and window title style.
+   - `off` resets only the originating pane; window colors reflect the remaining agents.
    - With `@agent-indicator-animation-enabled on`, running state animates the status indicator.
    - `needs-input` title, pane, and border styling survives focus until the agent reports its next state.
-   - `done` title styling clears when you focus the source pane/window again.
-   - With `@agent-indicator-reset-on-focus on`, done pane styling clears when focusing pane/window.
+   - Focusing the window acknowledges all its `done` panes, preserving `running` and `needs-input`.
+   - With `@agent-indicator-reset-on-focus on`, all done pane backgrounds clear when the window is focused.
 4. Validate empty-value semantics (`set -g @agent-indicator-done-bg ''` should skip background changes).
 5. Validate status icon appears when agent state/process is active.
 
@@ -206,3 +208,26 @@ Optional screenshot capture:
 ```bash
 screencapture -x /tmp/tmux-agent-indicator-check.png
 ```
+
+## Shared-window state and menu-bar integration
+
+`test-window-state-priority.sh` covers all 16 pairs of idle/done/running/needs-input in both hook
+arrival orders, three-agent windows, concurrent hooks and idle sweeps, completion acknowledgment,
+original-style restoration, stale focus callbacks, and moving/closing panes. The expected priority
+is `needs-input > running > done > idle`; the published `@agent-indicator-state`, normal title,
+current title, and border must agree. No waiting/running pane may be cleared by another pane's
+completion or cancellation.
+
+For a menu-bar consumer, compare its displayed state with:
+
+```bash
+tmux list-windows -a -F '#{window_index}: #{@agent-indicator-state} | #{window-status-style} | #{window-status-current-style}'
+```
+
+With active-window styling enabled and matching configured colors, any discrepancy should clear
+within the consumer's polling interval. Consumers must read the published window state rather than
+applying their own pane priority. Remote plugin installations need the same aggregation code;
+consumers of older remote installations can mirror their actual title color instead.
+
+`test-window-state-edge-cases.sh` also covers empty style options, shared animation lifetime,
+retained exited panes (`remain-on-exit`), and resetting the published state.

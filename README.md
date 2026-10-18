@@ -26,10 +26,38 @@ Each state can change:
 - Window title background and foreground
 - Status bar icon (per-agent, e.g. `claude=🤖`, `codex=🧠`)
 
-Done indicators reset when you focus the pane/window. Needs-input indicators stay visible until
+Focusing any pane in a window acknowledges **all completed agents in that window**.
+Waiting and running agents keep their states. Needs-input indicators stay visible until
 the agent reports its next state; focusing a permission prompt does not answer it. Window titles
 are coloured only for windows other than the one you are looking at, unless
 `@agent-indicator-style-active-window` is on.
+
+When several panes share a window, its title and border use the highest-priority live pane state:
+
+| Panes in the window | Window state |
+| --- | --- |
+| Any agent needs input | `needs-input` |
+| Otherwise, any agent is running | `running` |
+| Otherwise, at least one agent is done | `done` |
+| All agents are idle/off | `idle` (restores the original style) |
+
+This applies to any number of panes, regardless of hook arrival order. For example, done + running
+stays running, done + idle shows done, and needs-input + done stays needs-input. Canceling one agent
+clears only its pane. Moving or closing a pane recalculates the affected windows.
+
+The plugin publishes this result as the window option `@agent-indicator-state`. Menu-bar indicators
+should read that option instead of independently ranking pane states:
+
+```bash
+tmux list-windows -a -F '#{window_id} #{@agent-indicator-state}'
+```
+
+Use `@agent-indicator-style-active-window on` and configure title colors for each state when mirroring
+window colors in another UI. The plugin does not install an OS menu-bar integration. An integration
+that supplies an idle color can call `scripts/window-state.sh --idle-style <window_id> 'bg=blue,fg=white'`
+(or `__UNSET__` to remove its idle override). That command shares the state-update lock, preserves
+active colors, and reconciles the window. Polling it also repairs stale colors without acknowledging
+completion. Run `scripts/window-state.sh` to reconcile every window without changing pane states.
 
 ## Features
 

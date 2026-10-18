@@ -11,14 +11,9 @@ if ! tmux display-message -p '#{session_name}' >/dev/null 2>&1; then
     exit 0
 fi
 
-tmux_get_env() {
-    local key="$1"
-    tmux show-environment -g "$key" 2>/dev/null | sed 's/^[^=]*=//' || true
-}
-
-tmux_unset_env() {
-    tmux set-environment -gu "$1" 2>/dev/null || true
-}
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/state-lib.sh"
+lock_agent_state
 
 reset_window_option() {
     local window_id="$1"
@@ -60,7 +55,7 @@ while IFS= read -r window_id; do
     reset_window_option "$window_id" "window-status-style" "TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_STYLE"
     reset_window_option "$window_id" "window-status-current-style" "TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_CURRENT_STYLE"
     reset_window_option "$window_id" "pane-active-border-style" "TMUX_AGENT_WINDOW_${window_id}_ORIG_ACTIVE_BORDER_STYLE"
-    tmux_unset_env "TMUX_AGENT_WINDOW_${window_id}_DONE"
+    tmux set-window-option -qt "$window_id" @agent-indicator-state idle
 done < <(tmux list-windows -a -F '#{window_id}')
 
 # Remove all TMUX_AGENT_* env vars

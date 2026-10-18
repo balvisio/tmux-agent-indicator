@@ -7,6 +7,8 @@
 set -euo pipefail
 
 cleanup() {
+    # An exiting loop must not erase the PID/frame of a replacement loop.
+    [ "$(tmux show-environment -g TMUX_AGENT_ANIMATION_PID 2>/dev/null || true)" = "TMUX_AGENT_ANIMATION_PID=$$" ] || return 0
     tmux set-environment -gu TMUX_AGENT_ANIMATION_FRAME 2>/dev/null || true
     tmux set-environment -gu TMUX_AGENT_ANIMATION_PID 2>/dev/null || true
 }

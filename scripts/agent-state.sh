@@ -14,219 +14,8 @@ if ! command -v tmux >/dev/null 2>&1 || [ -z "${TMUX:-}" ]; then
     exit 0
 fi
 
-tmux_option_is_set() {
-    local option="$1"
-    local raw
-    raw=$(tmux show-option -gq "$option" 2>/dev/null || true)
-    [ -n "$raw" ]
-}
-
-tmux_get_option_or_default() {
-    local option="$1"
-    local default_value="$2"
-    local value
-
-    if tmux_option_is_set "$option"; then
-        value=$(tmux show-option -gqv "$option")
-        printf '%s\n' "$value"
-    else
-        printf '%s\n' "$default_value"
-    fi
-}
-
-tmux_get_env() {
-    local key="$1"
-    tmux show-environment -g "$key" 2>/dev/null | sed 's/^[^=]*=//' || true
-}
-
-tmux_set_env() {
-    tmux set-environment -g "$1" "$2"
-}
-
-tmux_unset_env() {
-    tmux set-environment -gu "$1" 2>/dev/null || true
-}
-
-is_enabled() {
-    case "$1" in
-        on|true|yes|1) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-default_state_bg() {
-    case "$1" in
-        running) printf 'default\n' ;;
-        needs-input) printf 'default\n' ;;
-        done) printf 'default\n' ;;
-        *) printf 'default\n' ;;
-    esac
-}
-
-default_state_border() {
-    case "$1" in
-        running) printf 'default\n' ;;
-        needs-input) printf 'yellow\n' ;;
-        done) printf 'green\n' ;;
-        *) printf 'default\n' ;;
-    esac
-}
-
-default_state_title_bg() {
-    case "$1" in
-        needs-input) printf 'yellow\n' ;;
-        done) printf 'red\n' ;;
-        *) printf '\n' ;;
-    esac
-}
-
-default_state_title_fg() {
-    case "$1" in
-        needs-input) printf 'black\n' ;;
-        done) printf 'black\n' ;;
-        *) printf '\n' ;;
-    esac
-}
-
-save_window_option_once() {
-    local window_id="$1"
-    local option="$2"
-    local env_key="$3"
-    local marker="__UNSET__"
-    local existing saved
-
-    existing=$(tmux_get_env "$env_key")
-    if [ -n "$existing" ]; then
-        return
-    fi
-
-    saved=$(tmux show-window-option -qvt "$window_id" "$option" 2>/dev/null || true)
-    if [ -z "$saved" ]; then
-        tmux_set_env "$env_key" "$marker"
-    else
-        tmux_set_env "$env_key" "$saved"
-    fi
-}
-
-restore_window_option() {
-    local window_id="$1"
-    local option="$2"
-    local env_key="$3"
-    local marker="__UNSET__"
-    local saved
-
-    saved=$(tmux_get_env "$env_key")
-    if [ -z "$saved" ]; then
-        return
-    fi
-    if [ "$saved" = "$marker" ]; then
-        tmux set-window-option -qt "$window_id" -u "$option" || true
-    else
-        tmux set-window-option -qt "$window_id" "$option" "$saved"
-    fi
-    tmux_unset_env "$env_key"
-}
-
-apply_window_title_style() {
-    local window_id="$1"
-    local bg="$2"
-    local fg="$3"
-    local mark_done="${4:-}"
-    local status_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_STYLE"
-    local current_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_CURRENT_STYLE"
-    local done_key="TMUX_AGENT_WINDOW_${window_id}_DONE"
-
-    if [ -z "$bg" ] || [ -z "$fg" ]; then
-        return
-    fi
-
-    save_window_option_once "$window_id" "window-status-style" "$status_key"
-    save_window_option_once "$window_id" "window-status-current-style" "$current_key"
-    tmux set-window-option -qt "$window_id" window-status-style "bg=$bg,fg=$fg"
-    tmux set-window-option -qt "$window_id" window-status-current-style "bg=$bg,fg=$fg"
-    if [ "$mark_done" = "done" ]; then
-        tmux_set_env "$done_key" "1"
-    fi
-}
-
-clear_window_title_style() {
-    local window_id="$1"
-    [ -z "$window_id" ] && return
-    local status_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_STYLE"
-    local current_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_CURRENT_STYLE"
-    local done_key="TMUX_AGENT_WINDOW_${window_id}_DONE"
-
-    restore_window_option "$window_id" "window-status-style" "$status_key"
-    restore_window_option "$window_id" "window-status-current-style" "$current_key"
-    tmux_unset_env "$done_key"
-}
-
-apply_active_border_style() {
-    local window_id="$1"
-    local border="$2"
-    local orig_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_ACTIVE_BORDER_STYLE"
-    save_window_option_once "$window_id" "pane-active-border-style" "$orig_key"
-    tmux set-window-option -qt "$window_id" pane-active-border-style "fg=$border,bold"
-}
-
-restore_active_border_style() {
-    local window_id="$1"
-    local orig_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_ACTIVE_BORDER_STYLE"
-    restore_window_option "$window_id" "pane-active-border-style" "$orig_key"
-}
-
-# Style panes via the pane-scoped window-style option rather than
-# `select-pane -P`: select-pane also makes the target pane the active pane,
-# which steals focus when the styled pane shares the user's current window.
-# The previous capture/restore dance raced with user navigation and could
-# resolve the wrong "active" pane when run without a client context (e.g.
-# from agent hooks). set-option -p has no focus side effect at all.
-reset_pane_style() {
-    local pane_id="$1"
-    tmux set-option -p -t "$pane_id" window-style "bg=default"
-}
-
-apply_pane_style() {
-    local pane_id="$1"
-    local bg="$2"
-    tmux set-option -p -t "$pane_id" window-style "bg=$bg"
-}
-
-pane_exists() {
-    local pane_id="$1"
-    [ -n "$pane_id" ] || return 1
-    tmux display-message -p -t "$pane_id" '#{pane_id}' >/dev/null 2>&1
-}
-
-start_animation() {
-    local anim_enabled
-    anim_enabled=$(tmux_get_option_or_default "@agent-indicator-animation-enabled" "off")
-    if ! is_enabled "$anim_enabled"; then
-        return
-    fi
-
-    # Check if animation process is already alive.
-    local existing_pid
-    existing_pid=$(tmux_get_env "TMUX_AGENT_ANIMATION_PID")
-    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
-        return
-    fi
-
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    nohup bash "$script_dir/animation.sh" >/dev/null 2>&1 &
-    disown
-}
-
-stop_animation() {
-    local pid
-    pid=$(tmux_get_env "TMUX_AGENT_ANIMATION_PID")
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-    fi
-    tmux set-environment -gu TMUX_AGENT_ANIMATION_PID 2>/dev/null || true
-    tmux set-environment -gu TMUX_AGENT_ANIMATION_FRAME 2>/dev/null || true
-}
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/state-lib.sh"
 
 # Codex --no-daemon hooks descend from their pane's starting process (pane_pid).
 # TMUX_PANE can be missing or stale, so find that process in the hook's ancestry.
@@ -366,192 +155,47 @@ if [ -z "$pane_id" ]; then
     exit 0
 fi
 
-# --if-state: leave everything alone unless the pane is currently in that state.
+# State transitions, focus acknowledgments, and window rendering share one server lock.
+lock_agent_state
+pane_exists "$pane_id" || exit 0
 if [ -n "$if_state" ]; then
     current_state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")
     [ "${current_state:-off}" = "$if_state" ] || exit 0
 fi
 window_id=$(tmux display-message -p -t "$pane_id" '#{window_id}')
-active_window_id=$(tmux display-message -p '#{window_id}')
 active_pane_id=$(tmux display-message -p '#{pane_id}')
-
-# Clear session-dots seen marker so new attention is visible
 pane_session=$(tmux display-message -p -t "$pane_id" '#{session_name}' 2>/dev/null || true)
 if [ -n "$pane_session" ]; then
     tmux_unset_env "TMUX_AGENT_SESSION_SEEN_${pane_session}"
 fi
 
-background_enabled=$(tmux_get_option_or_default "@agent-indicator-background-enabled" "on")
-border_enabled=$(tmux_get_option_or_default "@agent-indicator-border-enabled" "on")
-reset_on_focus=$(tmux_get_option_or_default "@agent-indicator-reset-on-focus" "on")
-# Window-title styling skips the window the user is looking at unless this is on.
-style_active_window=$(tmux_get_option_or_default "@agent-indicator-style-active-window" "off")
-
-state_key="TMUX_AGENT_PANE_${pane_id}_STATE"
-agent_key="TMUX_AGENT_PANE_${pane_id}_AGENT"
-done_key="TMUX_AGENT_PANE_${pane_id}_DONE"
-done_window_key="TMUX_AGENT_PANE_${pane_id}_DONE_WINDOW"
-pending_reset_key="TMUX_AGENT_PANE_${pane_id}_PENDING_RESET"
-
-if [ "$state" != "off" ]; then
-    state_enabled=$(tmux_get_option_or_default "@agent-indicator-${state}-enabled" "on")
-    if ! is_enabled "$state_enabled"; then
-        state="off"
-    fi
+if [ "$state" != off ] && ! is_enabled "$(tmux_get_option_or_default "@agent-indicator-${state}-enabled" on)"; then
+    state=off
 fi
-
-case "$state" in
-    running|needs-input|done)
-        state_bg=$(tmux_get_option_or_default "@agent-indicator-${state}-bg" "$(default_state_bg "$state")")
-        state_border=$(tmux_get_option_or_default "@agent-indicator-${state}-border" "$(default_state_border "$state")")
-        state_title_bg=$(tmux_get_option_or_default "@agent-indicator-${state}-window-title-bg" "$(default_state_title_bg "$state")")
-        state_title_fg=$(tmux_get_option_or_default "@agent-indicator-${state}-window-title-fg" "$(default_state_title_fg "$state")")
-        ;;
-esac
-
-case "$state" in
-    running)
-        clear_window_title_style "$window_id"
-        tmux_unset_env "$done_key"
-        tmux_unset_env "$done_window_key"
-        tmux_unset_env "$pending_reset_key"
-        tmux_set_env "$state_key" "$state"
-        tmux_set_env "$agent_key" "$agent"
-        tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
-
-        if [ "$pane_id" != "$active_pane_id" ]; then
-            if is_enabled "$background_enabled"; then
-                if [ -z "$state_bg" ]; then
-                    :
-                elif [ "$state_bg" = "default" ]; then
-                    reset_pane_style "$pane_id"
-                else
-                    apply_pane_style "$pane_id" "$state_bg"
-                fi
-            else
-                reset_pane_style "$pane_id"
-            fi
-        fi
-
-        if is_enabled "$border_enabled"; then
-            if [ -z "$state_border" ]; then
-                :
-            elif [ "$state_border" = "default" ]; then
-                restore_active_border_style "$window_id"
-            else
-                apply_active_border_style "$window_id" "$state_border"
-            fi
-        else
-            restore_active_border_style "$window_id"
-        fi
-
-        if [ "$window_id" != "$active_window_id" ] || is_enabled "$style_active_window"; then
-            apply_window_title_style "$window_id" "$state_title_bg" "$state_title_fg"
-        fi
-        start_animation
-        notify_state_change "$agent" "$state" "$pane_id"
-        ;;
-    needs-input)
-        stop_animation
-        clear_window_title_style "$window_id"
-        tmux_unset_env "$done_key"
-        tmux_unset_env "$done_window_key"
-        tmux_unset_env "$pending_reset_key"
-        tmux_set_env "$state_key" "$state"
-        tmux_set_env "$agent_key" "$agent"
-        tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
-
-        if [ "$pane_id" != "$active_pane_id" ]; then
-            if is_enabled "$background_enabled"; then
-                if [ -z "$state_bg" ]; then
-                    :
-                elif [ "$state_bg" = "default" ]; then
-                    reset_pane_style "$pane_id"
-                else
-                    apply_pane_style "$pane_id" "$state_bg"
-                fi
-            else
-                reset_pane_style "$pane_id"
-            fi
-        fi
-
-        if is_enabled "$border_enabled"; then
-            if [ -z "$state_border" ]; then
-                :
-            elif [ "$state_border" = "default" ]; then
-                restore_active_border_style "$window_id"
-            else
-                apply_active_border_style "$window_id" "$state_border"
-            fi
-        else
-            restore_active_border_style "$window_id"
-        fi
-
-        if [ "$window_id" != "$active_window_id" ] || is_enabled "$style_active_window"; then
-            apply_window_title_style "$window_id" "$state_title_bg" "$state_title_fg"
-        fi
-        notify_state_change "$agent" "$state" "$pane_id"
-        ;;
-    done)
-        stop_animation
-        tmux_set_env "$state_key" "done"
-        tmux_set_env "$agent_key" "$agent"
-        tmux_set_env "$done_key" "1"
-        tmux_set_env "$done_window_key" "$window_id"
-        tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
-
-        if [ "$pane_id" != "$active_pane_id" ]; then
-            if is_enabled "$background_enabled"; then
-                if [ -z "$state_bg" ]; then
-                    :
-                elif [ "$state_bg" = "default" ]; then
-                    reset_pane_style "$pane_id"
-                else
-                    apply_pane_style "$pane_id" "$state_bg"
-                fi
-            fi
-        fi
-
-        if is_enabled "$border_enabled"; then
-            if [ -z "$state_border" ]; then
-                :
-            elif [ "$state_border" = "default" ]; then
-                restore_active_border_style "$window_id"
-            else
-                apply_active_border_style "$window_id" "$state_border"
-            fi
-        fi
-
-        if [ "$window_id" != "$active_window_id" ] || is_enabled "$style_active_window"; then
-            apply_window_title_style "$window_id" "$state_title_bg" "$state_title_fg" "done"
-        fi
-        notify_state_change "$agent" "$state" "$pane_id"
-
-        if is_enabled "$reset_on_focus"; then
-            tmux_set_env "$pending_reset_key" "1"
-        else
-            tmux_unset_env "$pending_reset_key"
-            reset_pane_style "$pane_id"
-            restore_active_border_style "$window_id"
-            clear_window_title_style "$window_id"
-            tmux_unset_env "$done_key"
-            tmux_unset_env "$done_window_key"
-            tmux_unset_env "$state_key"
-            tmux_unset_env "$agent_key"
-        fi
-        ;;
-    off)
-        stop_animation
-        clear_window_title_style "$window_id"
-        tmux_unset_env "$done_key"
-        tmux_unset_env "$done_window_key"
-        tmux_unset_env "$pending_reset_key"
-        tmux_unset_env "$state_key"
-        tmux_unset_env "$agent_key"
-        tmux_unset_env "TMUX_AGENT_ACTIVE_PANE_${agent}"
+clear_pane_state "$pane_id"
+if [ "$state" != off ]; then
+    tmux_set_env "TMUX_AGENT_PANE_${pane_id}_STATE" "$state"
+    tmux_set_env "TMUX_AGENT_PANE_${pane_id}_AGENT" "$agent"
+    tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
+    state_bg=$(tmux_get_option_or_default "@agent-indicator-${state}-bg" "$(default_state_bg "$state")")
+    if ! is_enabled "$(tmux_get_option_or_default @agent-indicator-background-enabled on)"; then
         reset_pane_style "$pane_id"
-        restore_active_border_style "$window_id"
-        ;;
-esac
-
+    elif [ "$state_bg" = default ]; then
+        reset_pane_style "$pane_id"
+    elif [ -n "$state_bg" ] && [ "$pane_id" != "$active_pane_id" ]; then
+        apply_pane_style "$pane_id" "$state_bg"
+    fi
+    if [ "$state" = done ] && ! is_enabled "$(tmux_get_option_or_default @agent-indicator-reset-on-focus on)"; then
+        clear_pane_state "$pane_id"
+        reset_pane_style "$pane_id"
+    fi
+else
+    reset_pane_style "$pane_id"
+fi
+render_window_state "$window_id"
+sync_animation
+unlock_agent_state
+if [ "$state" != off ]; then
+    notify_state_change "$agent" "$state" "$pane_id"
+fi
 tmux refresh-client -S >/dev/null 2>&1 || true

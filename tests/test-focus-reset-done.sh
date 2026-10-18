@@ -37,7 +37,7 @@ second_style_before="$(tmux_cmd show-options -pv -p -t "$second_done_pane" windo
 
 tmux_cmd select-pane -t "$first_done_pane"
 second_style_unfocused="$(tmux_cmd show-options -pv -p -t "$second_done_pane" window-style)"
-[ "$second_style_unfocused" = "bg=colour22" ] || fail "second done pane style should remain until focus: $second_style_unfocused"
+[ "$second_style_unfocused" = "bg=default" ] || fail "window focus should acknowledge every completed pane: $second_style_unfocused"
 
 tmux_cmd select-pane -t "$second_done_pane"
 second_style_after="$(tmux_cmd show-options -pv -p -t "$second_done_pane" window-style)"
