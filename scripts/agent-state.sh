@@ -16,6 +16,8 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/state-lib.sh"
+lock_agent_state "$@"
+shift
 
 # Codex --no-daemon hooks descend from their pane's starting process (pane_pid).
 # TMUX_PANE can be missing or stale, so find that process in the hook's ancestry.
@@ -155,8 +157,7 @@ if [ -z "$pane_id" ]; then
     exit 0
 fi
 
-# State transitions, focus acknowledgments, and window rendering share one server lock.
-lock_agent_state
+# The launcher holds the server state lock across this entire transition.
 pane_exists "$pane_id" || exit 0
 if [ -n "$if_state" ]; then
     current_state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")

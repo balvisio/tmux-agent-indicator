@@ -3,10 +3,18 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Full sweeps acquire one short-lived lock per window, letting hooks run between windows.
+if [ "$#" -eq 0 ]; then
+    while IFS= read -r window_id; do
+        "$0" "$window_id"
+    done < <(tmux list-windows -a -F '#{window_id}' | sort -u)
+    exit 0
+fi
 source "$script_dir/state-lib.sh"
+lock_agent_state "$@"
+shift
 
 if [ "${1:-}" = --idle-style ]; then
-    lock_agent_state
     # The presence integration owns idle styling; active styling always comes from pane states.
     window_id="$2"
     value="$3"
@@ -23,17 +31,6 @@ if [ "${1:-}" = --idle-style ]; then
     done
     render_window_state "$window_id"
 else
-    while IFS= read -r window_id; do
-        lock_agent_state
-        render_window_state "$window_id"
-        unlock_agent_state
-    done < <(
-        if [ -n "${1:-}" ]; then
-            printf '%s\n' "$1"
-        else
-            tmux list-windows -a -F '#{window_id}' | sort -u
-        fi
-    )
-    lock_agent_state
+    render_window_state "$1"
 fi
 sync_animation

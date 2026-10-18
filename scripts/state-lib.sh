@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Shared state and styling helpers. Source this file; acquire the lock before mutations.
 
+# Call at the entrypoint with its original arguments, then shift the private marker.
+# The Python launcher acquires a process-owned record lock and execs this shell.
 lock_agent_state() {
-    tmux wait-for -L agent-indicator-state
-    trap 'tmux wait-for -U agent-indicator-state 2>/dev/null || true' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM HUP
+    if [ "${1:-}" != --agent-state-lock-held ]; then
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        exec python3 "$script_dir/state-lock.py" "$0" "$@"
+    fi
 }
 
 unlock_agent_state() {
-    tmux wait-for -U agent-indicator-state
-    trap - EXIT INT TERM HUP
+    # POSIX record locks belong to this process, not to children inheriting descriptor 9.
+    exec 9>&-
 }
 
 clear_pane_state() {

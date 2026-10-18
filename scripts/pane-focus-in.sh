@@ -5,9 +5,10 @@ set -euo pipefail
 command -v tmux >/dev/null 2>&1 || exit 0
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/state-lib.sh"
+lock_agent_state "$@"
+shift
 pane_id="${1:-$(tmux display-message -p '#{pane_id}')}"
 window_id="${2:-$(tmux display-message -p -t "$pane_id" '#{window_id}')}"
-lock_agent_state
 
 # Recheck focus after acquiring the lock: queued events can outlive user navigation.
 [ "$(tmux display-message -p -t "$pane_id" '#{pane_active}:#{window_active}:#{window_id}' 2>/dev/null || true)" = "1:1:$window_id" ] || exit 0

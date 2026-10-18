@@ -22,6 +22,7 @@ Run individual checks:
 
 ```bash
 ./tests/test-agent-limits.sh
+./tests/test-state-lock.py
 ./tests/test-state-transitions.sh
 ./tests/test-indicator-output.sh
 ./tests/test-focus-reset-done.sh
@@ -231,3 +232,10 @@ consumers of older remote installations can mirror their actual title color inst
 
 `test-window-state-edge-cases.sh` also covers empty style options, shared animation lifetime,
 retained exited panes (`remain-on-exit`), and resetting the published state.
+
+## State lock recovery
+
+`test-state-lock.py` holds the real writer lock on an isolated tmux server. It verifies that a blocked
+hook exits after the two-second wait without changing pane state, then kills the owner with SIGKILL
+and confirms a real state hook succeeds while the owner's background child remains alive. It also
+checks explicit unlock before process exit and serialized writes from concurrent processes.

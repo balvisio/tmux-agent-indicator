@@ -59,6 +59,12 @@ that supplies an idle color can call `scripts/window-state.sh --idle-style <wind
 active colors, and reconciles the window. Polling it also repairs stale colors without acknowledging
 completion. Run `scripts/window-state.sh` to reconcile every window without changing pane states.
 
+State writers use a process-owned file lock scoped to the tmux server. The operating system releases
+it when the writer exits, including a forced kill; background children do not inherit the lock.
+A writer waits at most two seconds for contention, then exits with status 75 without changing state.
+Full sweeps lock one window update at a time so hooks can run between updates. The empty lock file
+next to the tmux socket is intentional and must not be deleted while that server has active writers.
+
 ## Features
 
 - Per-agent status icons in the status bar

@@ -13,7 +13,8 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/state-lib.sh"
-lock_agent_state
+lock_agent_state "$@"
+shift
 
 reset_window_option() {
     local window_id="$1"
