@@ -45,6 +45,9 @@ register_focus_hooks() {
     register_hook_once "pane-focus-in" "$hook_command"
     register_hook_once "after-select-window" "$hook_command"
     register_hook_once "after-select-pane" "$hook_command"
+    # Window switches that bypass select-window (a status-bar mouse click runs switch-client;
+    # next-/previous-/last-window have no after-* hooks) still fire session-window-changed.
+    register_hook_once "session-window-changed" "$hook_command"
 }
 
 main() {
