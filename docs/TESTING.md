@@ -26,6 +26,7 @@ Run individual checks:
 ./tests/test-state-lock.py
 ./tests/test-state-transitions.sh
 ./tests/test-indicator-output.sh
+./tests/test-pane-presence.py
 ./tests/test-focus-reset-done.sh
 ./tests/test-window-title-reset.sh
 ./tests/test-window-state-priority.sh
@@ -255,3 +256,10 @@ named/indexed/RGB colors, actual current/inactive/inherited styles, remote probe
 redraws, and menu colors. SSH-only segments must keep excluding container agents, and changing a
 palette must not play state-change sounds. Install Lua to run this optional integration test; CI
 installs it and runs the test as part of the suite.
+
+## Container terminal collisions
+
+`test-pane-presence.py` supplies a process snapshot where host and container processes share tty
+names. A plain host shell must lose stale agent labels, blue styling, SSH-host labels, and fallback
+icons. Real descendants (including wrapped agents and agents in sibling panes) must remain visible.
+This checks both the optional presence sweep and the plugin indicator.

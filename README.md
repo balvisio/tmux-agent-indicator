@@ -72,6 +72,24 @@ before detaching, and queued events are discarded if that pane was replaced or t
 Full sweeps lock one window update at a time so hooks can run between updates. The empty lock file
 next to the tmux socket is intentional and must not be deleted while that server has active writers.
 
+### Optional presence labels
+
+`scripts/agent-present.sh sweep` maintains blue idle styling, `@agent_present`, `@agent_label`, and
+`@ssh_host` for integrations such as the Hammerspoon dots. It uses `scripts/pane-processes.sh` to
+require both a matching terminal and ancestry from the pane process. This prevents container
+processes with the same `pts/N` names from labeling unrelated host shells as agents or SSH sessions.
+The plugin indicator uses the same ancestry filter for its process-detection fallback.
+
+For an existing `~/.tmux/agent-present.sh` entrypoint, replace its implementation with this dispatcher
+so the status configuration can continue calling the same path:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+plugin_dir="${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}"
+exec "$plugin_dir/scripts/agent-present.sh" "$@"
+```
+
 ## Features
 
 - Per-agent status icons in the status bar

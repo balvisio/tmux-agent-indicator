@@ -17,14 +17,15 @@ inside a custom window label are outside this style-based integration.
 
 ## Existing companion configuration
 
-The script expects these window options from a presence sweep, such as `~/.tmux/agent-present.sh`:
+The script expects these window options from `scripts/agent-present.sh sweep` (often dispatched
+through `~/.tmux/agent-present.sh`):
 
 - `@agent_present=1` for windows containing an agent.
 - `@agent_label` for their display labels.
 - `@ssh_host` on local SSH windows for remote-host discovery.
 
 For remote notifications and Do Not Disturb, it uses `~/.tmux/agent-sound.sh` and
-`~/.local/state/agent-dots/mode`. These presence/sound scripts are separate from this repository.
+`~/.local/state/agent-dots/mode`. The sound script is separate from this repository.
 The tmux binary path near the top of the module defaults to `/opt/homebrew/bin/tmux`; adjust it for
 other Homebrew installations. Remote hosts need tmux and the same presence options. Container
 inspection additionally uses Docker on the remote host.

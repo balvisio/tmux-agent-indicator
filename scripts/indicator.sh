@@ -2,6 +2,7 @@
 # Status bar indicator - shows agent icon from pane state or process detection.
 
 set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check tmux availability and active server context
 if ! command -v tmux >/dev/null 2>&1; then
@@ -116,6 +117,7 @@ esac
 # Get current pane
 PANE_ID=$(tmux display-message -p '#{pane_id}')
 PANE_TTY=$(tmux display-message -p '#{pane_tty}')
+PANE_PID=$(tmux display-message -p '#{pane_pid}')
 WINDOW_ID=$(tmux display-message -p '#{window_id}')
 STATE=$(tmux_get_env "TMUX_AGENT_PANE_${PANE_ID}_STATE")
 AGENT=$(tmux_get_env "TMUX_AGENT_PANE_${PANE_ID}_AGENT")
@@ -160,8 +162,8 @@ if [ -n "$PANE_TTY" ]; then
     for proc in "${PROC_ARRAY[@]}"; do
         proc=$(trim "$proc")
         [ -z "$proc" ] && continue
-        # Check if process is running on this TTY
-        if ps -t "$(basename "$PANE_TTY")" -o command= 2>/dev/null | grep -qw "$proc"; then
+        # A container may expose the same tty name; also require pane ancestry.
+        if "$script_dir/pane-processes.sh" "$PANE_PID" "$PANE_TTY" | grep -qw "$proc"; then
             icon_for_agent "$proc" "$ICONS"
             exit 0
         fi
@@ -169,19 +171,19 @@ if [ -n "$PANE_TTY" ]; then
 fi
 
 # Method 4: Process detection in other panes of current window
-while IFS=' ' read -r other_pane other_tty other_active; do
+while IFS=' ' read -r other_pane other_tty other_pid other_active; do
     [ "$other_active" = "1" ] && continue
     [ -n "$other_tty" ] || continue
     IFS=',' read -ra PROC_ARRAY <<< "$PROCESSES"
     for proc in "${PROC_ARRAY[@]}"; do
         proc=$(trim "$proc")
         [ -z "$proc" ] && continue
-        if ps -t "$(basename "$other_tty")" -o command= 2>/dev/null | grep -qw "$proc"; then
+        if "$script_dir/pane-processes.sh" "$other_pid" "$other_tty" | grep -qw "$proc"; then
             icon_for_agent "$proc" "$ICONS"
             exit 0
         fi
     done
-done < <(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id} #{pane_tty} #{pane_active}')
+done < <(tmux list-panes -t "$WINDOW_ID" -F '#{pane_id} #{pane_tty} #{pane_pid} #{pane_active}')
 
 # No agent detected
 echo ""
