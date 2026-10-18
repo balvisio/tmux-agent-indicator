@@ -23,6 +23,17 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-state.sh --agent codex --state running --if-state needs-input",
+            "statusMessage": "tmux: codex running"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

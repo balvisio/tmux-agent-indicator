@@ -56,7 +56,7 @@ bash ~/.tmux/plugins/tmux-agent-indicator/setup.sh
 
 This installs files to `~/.tmux/plugins/tmux-agent-indicator` and updates:
 - `~/.claude/settings.json` hooks for Claude (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`)
-- `~/.codex/hooks.json` hooks for Codex (`UserPromptSubmit`, `PermissionRequest`, `Stop`)
+- `~/.codex/hooks.json` hooks for Codex (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`)
 - `~/.config/opencode/plugins/` plugin for OpenCode
 
 After installing Codex hooks, run `/hooks` in Codex and trust the tmux-agent-indicator hook definitions before they can run.
@@ -386,7 +386,7 @@ To integrate any agent that does not have built-in hook support, call `agent-sta
 `--state off` always resets pane background and border immediately.
 
 `--if-state <state>` makes the call conditional: nothing happens unless the pane is currently in that
-state (`off` = no state recorded). The Claude `PostToolUse` hook uses it to return from `needs-input`
+state (`off` = no state recorded). The `PostToolUse` hooks use it to return from `needs-input`
 to `running` once a permission prompt or question has been answered, without touching `running` or
 `done` panes:
 
@@ -405,9 +405,8 @@ The installer uses these templates as the source for Claude and Codex hook confi
 They map:
 - `UserPromptSubmit` -> `running`
 - `PermissionRequest` -> `needs-input`
-- `PostToolUse` -> `running`, only while the pane is `needs-input` (Claude only: an answered
-  permission prompt or `AskUserQuestion` goes back to `running` instead of staying `needs-input`
-  until `Stop`)
+- `PostToolUse` -> `running`, only while the pane is `needs-input` (an answered permission prompt or
+  question goes back to `running` instead of staying `needs-input` until `Stop`)
 - `Stop` -> `done`
 
 Codex hooks must be reviewed and trusted with `/hooks` before they can run.
