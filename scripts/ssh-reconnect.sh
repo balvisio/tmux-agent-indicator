@@ -52,6 +52,7 @@ if [ "$in_tmux" = 1 ]; then
     tmux set-option -pq -t "$TMUX_PANE" @ssh_reconnect_host "$host" \; \
          set-option -pq -t "$TMUX_PANE" @ssh_reconnect_pid "$$" 2>/dev/null
     tmux run-shell -b "$script_dir/agent-present.sh sweep" 2>/dev/null
+    "$script_dir/agent-recovery.py" ssh "$@" || true
 fi
 
 # Backgrounded only so this shell can react to signals; <&0 keeps the terminal as its input.

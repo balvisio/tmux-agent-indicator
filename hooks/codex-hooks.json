@@ -9,6 +9,15 @@
             "statusMessage": "tmux: codex running"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-recovery.py hook codex",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PermissionRequest": [
@@ -56,6 +65,15 @@
             "statusMessage": "tmux: codex session ended"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-recovery.py hook codex",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -65,6 +83,17 @@
             "type": "command",
             "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-state.sh --agent codex --state done",
             "statusMessage": "tmux: codex done"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}\"/scripts/agent-recovery.py hook codex",
+            "timeout": 5
           }
         ]
       }

@@ -18,6 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/balvisio/tmux-agent-indicator/main/
 Or from a checkout: `./install.sh`. The installer
 
 - copies the plugin to `~/.tmux/plugins/tmux-agent-indicator`
+- installs tested revisions of `tmux-resurrect` and `tmux-continuum` beside it for automatic recovery
 - writes `~/.tmux/agent-indicator.conf` and adds one `source-file` line to `~/.tmux.conf`; your settings go in `~/.tmux/agent-indicator.local.conf`
 - adds the Claude hooks to `~/.claude/settings.json` and the Codex hooks to `~/.codex/hooks.json`
 - adds `alias codex='codex --no-daemon'` and `alias ssh-reconnect=…` to the shell startup files
@@ -45,6 +46,39 @@ bash "$S" --agent demo --state off           # cleared
 Start `claude` or `codex` in a window and switch to another one: the title is blue while idle, yellow
 while it works, magenta when it waits for you, red when it finished, cleared when you come back.
 Windows whose pane runs `ssh` are listed at the right end of the status bar.
+
+## Restore windows and conversations
+
+After a tmux server restart, start tmux normally. Its saved windows, splits and working directories
+return, and Claude/Codex reopen the conversation recorded for each pane. Start new agent sessions
+after installation, and trust the updated Codex hooks in `/hooks`.
+
+Layouts are saved every minute while the status bar is refreshing, and after agent starts and layout
+changes. `prefix` then **Ctrl-S** saves now; `prefix` then **Ctrl-R** restores the latest snapshot.
+`ssh-reconnect` panes reopen their saved destination. Run the installer on remote hosts too if their
+tmux windows need recovery. Ordinary shell commands are not replayed.
+
+Recovery reopens saved conversation history; it cannot resume an interrupted tool or recover text
+the agent had not saved. Keep the agents' own conversation storage. Snapshot files are retained under
+`~/.local/state/tmux-agent-indicator/recovery` (`$XDG_STATE_HOME` when set), including after uninstall.
+The latest 20 different snapshots are kept separately for each tmux socket in machine-local storage.
+Changing networks or renaming the machine does not change which snapshots are restored.
+Other tmux servers do not prevent saving or startup recovery. Reloading the configuration does not
+restore an old layout into an established server.
+
+If a save fails, the tmux bar shows **Recovery: save failed** and the time of the last successful save.
+The warning stays until a save succeeds. Background failures leave your typing uninterrupted, and
+the previous snapshot is kept. Read the error details with:
+
+```bash
+tail -n 50 "${XDG_STATE_HOME:-$HOME/.local/state}"/tmux-agent-indicator/recovery/*/errors.log
+```
+
+To disable automatic recovery, add to `~/.tmux/agent-indicator.local.conf` and reload the config:
+
+```tmux
+set -g @agent-indicator-recovery 'off'
+```
 
 ## Remote Linux host
 

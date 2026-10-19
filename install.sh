@@ -208,6 +208,8 @@ put_tagged_line() {
 }
 
 if [ "$UNINSTALL_ALL" = true ]; then
+    python3 "$SCRIPT_DIR/scripts/agent-recovery.py" disable "$TARGET_DIR"
+    python3 "$SCRIPT_DIR/scripts/recovery-dependencies.py" --uninstall
     for f in "$TMUX_CONF" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HS_DIR/init.lua"; do
         remove_tagged_lines "$f"
     done
@@ -221,6 +223,11 @@ if [ "$UNINSTALL_ALL" = true ]; then
         done < "$OWNED"
         rm -f "$OWNED"
     fi
+fi
+
+# Fetch dependencies before replacing any live plugin files.
+if [ "$INSTALL_TMUX_CONF" = true ]; then
+    python3 "$SCRIPT_DIR/scripts/recovery-dependencies.py"
 fi
 
 # A symlink here points at a development checkout: replace the link, never write through it.
@@ -383,7 +390,8 @@ def unwrap_statusline(command):
     return False, ""
 
 def is_plugin_command(command):
-    return "scripts/agent-state.sh" in command and "--agent claude --state" in command
+    return ("scripts/agent-state.sh" in command and "--agent claude --state" in command
+            or "scripts/agent-recovery.py" in command and "hook claude" in command)
 
 for event in list(hooks.keys()):
     entries = hooks.get(event, [])
@@ -479,7 +487,7 @@ if [ "$INSTALL_CODEX" = true ] || [ "$UNINSTALL_CODEX" = true ]; then
 
     if [ "$INSTALL_CODEX" = true ]; then
         echo "Codex detected"
-        echo "  Hooks -> $CODEX_HOOKS (UserPromptSubmit, PermissionRequest, PostToolUse, Interrupt, SessionEnd, Stop)"
+        echo "  Hooks -> $CODEX_HOOKS (SessionStart, UserPromptSubmit, PermissionRequest, PostToolUse, Interrupt, SessionEnd, Stop)"
         echo "  Next: run /hooks in Codex and trust the tmux-agent-indicator hooks"
     fi
 
@@ -514,7 +522,8 @@ if not isinstance(hooks, dict):
     hooks = {}
 
 def is_plugin_command(command):
-    return "scripts/agent-state.sh" in command and "--agent codex --state" in command
+    return ("scripts/agent-state.sh" in command and "--agent codex --state" in command
+            or "scripts/agent-recovery.py" in command and "hook codex" in command)
 
 for event in list(hooks.keys()):
     entries = hooks.get(event, [])

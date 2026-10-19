@@ -42,7 +42,18 @@ Run individual checks:
 ./tests/test-ssh-reconnect.sh
 ./tests/test-install-startup-lines.sh
 ./tests/test-ssh-passthrough.sh
+./tests/test-agent-recovery.py
 ```
+
+The recovery test downloads the pinned Resurrect and Continuum dependencies into a temporary HOME.
+It uses fake agent CLIs on an isolated tmux socket, kills that server, and verifies automatic restart
+recovery of separate conversation IDs, splits, working directories and SSH launchers. It also checks
+installer idempotence, failed saves, exited agents and uninstall ownership. Two additional disposable
+servers remain running throughout the test. Slow restoration cannot overwrite the saved layout, and
+reloads respect the startup decision and restore settings. It requires process-list access; run outside
+a process-restricting sandbox. It never kills the user's tmux server.
+It also checks lookup across hostname changes, error logs, the rendered failure warning, quiet
+background saves, nonzero manual failures, and warning removal after an unchanged successful save.
 
 The ancestry test launches hooks inside two separate panes while an unrelated window stays selected.
 It checks all four states with both a missing `TMUX_PANE` and a stale value naming the unrelated pane.
