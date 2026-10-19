@@ -19,6 +19,8 @@
 -- Click for a menu: the mode switch (On / Do Not Disturb) on top, then the agent windows per place;
 -- picking one selects it in its tmux and focuses iTerm (local; SSH also selects the ssh window) or
 -- VS Code (VS).
+-- Wide titles summarize agent windows by source (T / VS / SSH), keeping the clock visible.
+-- Click > / < after the clock to expand/collapse; click elsewhere to open the agent menu.
 --
 -- Modes:
 --   On              dots as above, sounds as usual.
@@ -44,6 +46,7 @@ local VSCODE = "com.microsoft.VSCode"
 local REFRESH = 2 -- seconds, local tmux + clock
 local REMOTE_REFRESH = 3 -- seconds, each VS Code host
 local REMOTE_TIMEOUT = 20 -- seconds before a hung ssh poll is killed
+local MAX_TITLE_WIDTH = 600 -- points, also limited to 30% of the narrowest connected screen
 local HOME = os.getenv("HOME")
 local STATE_FILE = HOME .. "/.cache/agent_dots.state"
 local MODE_DIR = HOME .. "/.local/state/agent-dots"
@@ -60,6 +63,7 @@ local SSH_OPTS = {
 
 local MODES = { on = "On", dnd = "Do Not Disturb" }
 local STATES = { idle = true, running = true, ["needs-input"] = true, done = true }
+local STATE_PRIORITY = { idle = 1, done = 2, running = 3, ["needs-input"] = 4 }
 -- ANSI colors are theme-dependent. Use stable menu-bar equivalents for named
 -- colors; RGB and the extended 256-color palette have exact portable values.
 local ANSI = {
@@ -202,9 +206,12 @@ exit 0
 ]==]
 REMOTE_SCRIPT = REMOTE_SCRIPT:gsub("__WINDOW_STYLE__", function() return WINDOW_STYLE end)
 
-local menubar = nil
+local menubar, dropdown = nil, nil -- one visible item; a separate, hidden item supplies the popup menu
 local timer, remoteTimer = nil, nil
 local lastKey = nil -- fingerprint of what is currently drawn, to skip redundant redraws
+local compactOverride = nil -- start with automatic sizing; arrow clicks override until reload
+local compact = false -- layout currently shown
+local arrowWidth = 0 -- clickable width at the right edge; zero when DND hides the arrow
 local remote = {} -- host -> { windows, states, targets, ok, err, task, started }
 local segments = {} -- { kind = "VS" | "SSH", host, window = local ssh window id or nil }, display order
 local segmentsKey = "" -- fingerprint of `segments`, to redraw when the list changes
@@ -502,6 +509,16 @@ end
 local function label(s) return hs.styledtext.new(s, { color = LABEL_COLOR, font = LABEL_FONT }) end
 local function sep() return hs.styledtext.new("  |  ", { color = SEP_COLOR, font = SEP_FONT }) end
 
+-- Counts represent agent windows, with the color of the highest-priority window.
+local function summary(windows)
+    if #windows == 0 then return segment(windows) end
+    local top = windows[1]
+    for _, w in ipairs(windows) do
+        if STATE_PRIORITY[w.state] > STATE_PRIORITY[top.state] then top = w end
+    end
+    return hs.styledtext.new("●", { color = { hex = top.color }, font = DOT_FONT }) .. label(tostring(#windows))
+end
+
 -- Remote windows grouped by place (the host's tmux, or one dev container), keeping their sorted order.
 local function byPlace(windows)
     local groups, index = {}, {}
@@ -524,25 +541,65 @@ local function segmentName(seg, g, kindName)
     return name
 end
 
+-- At most two remote summaries, regardless of the number or length of host/container names.
+local function remoteSummary()
+    local groups, order = {}, {}
+    for _, seg in ipairs(segments) do
+        local g = groups[seg.kind]
+        if not g then
+            g = { windows = {}, seen = {} }
+            groups[seg.kind] = g
+            order[#order + 1] = seg.kind
+        end
+        for _, w in ipairs(windowsForSegment(seg)) do
+            local key = seg.host .. "/" .. w.spec .. "/" .. w.id
+            if not g.seen[key] then
+                g.seen[key] = true
+                g.windows[#g.windows + 1] = w
+            end
+        end
+    end
+    local text = label("")
+    for _, kind in ipairs(order) do
+        local g = groups[kind]
+        text = text .. sep() .. label(kind .. ": ") .. summary(g.windows)
+    end
+    return text
+end
+
+local function titleWidthLimit()
+    local width = MAX_TITLE_WIDTH
+    for _, screen in ipairs(hs.screen.allScreens()) do
+        width = math.min(width, screen:fullFrame().w * 0.30)
+    end
+    return math.floor(width)
+end
+
 -- Menu bar title: "T: <dots>" for the local tmux, then one "<segment name> : <dots>" per remote
--- place with agent windows ("… : ○" when a host has none), or ⛔ alone; then the stopwatch.
-local function title(mode, windows, since)
+-- place with agent windows ("… : ○" when a host has none), or ⛔ alone; then the stopwatch and arrow.
+local function title(mode, windows, since, collapsed)
     local text
     if mode == "dnd" then
         text = hs.styledtext.new(DND_GLYPH, { font = DOT_FONT })
     else
-        text = label("T: ") .. segment(windows)
-        for _, seg in ipairs(segments) do
-            local groups = byPlace(windowsForSegment(seg))
-            if #groups == 0 then
-                text = text .. sep() .. label(segmentName(seg) .. " : ") .. segment({})
-            end
-            for _, g in ipairs(groups) do
-                text = text .. sep() .. label(segmentName(seg, g) .. " : ") .. segment(g.windows)
+        text = label("T: ") .. (collapsed and summary(windows) or segment(windows))
+        if collapsed then
+            text = text .. remoteSummary()
+        else
+            for _, seg in ipairs(segments) do
+                local groups = byPlace(windowsForSegment(seg))
+                if #groups == 0 then
+                    text = text .. sep() .. label(segmentName(seg) .. " : ") .. segment({})
+                end
+                for _, g in ipairs(groups) do
+                    text = text .. sep() .. label(segmentName(seg, g) .. " : ") .. segment(g.windows)
+                end
             end
         end
     end
-    return text .. hs.styledtext.new("  " .. clock(since), { color = CLOCK_COLOR, font = CLOCK_FONT })
+    text = text .. hs.styledtext.new("  " .. clock(since), { color = CLOCK_COLOR, font = CLOCK_FONT })
+    if mode ~= "dnd" then text = text .. label(collapsed and "  >" or "  <") end
+    return text
 end
 
 -- Dropdown line "<text> — ● <state>" with the dot in the state colour. The plain runs get the menu
@@ -562,7 +619,10 @@ end
 
 local function windowsKey(windows)
     local parts = {}
-    for _, w in ipairs(windows) do parts[#parts + 1] = w.id .. ":" .. w.state .. ":" .. w.color .. (w.active and "*" or "") end
+    for _, w in ipairs(windows) do
+        parts[#parts + 1] = (w.spec or "") .. ":" .. (w.where or "") .. ":" .. w.id
+            .. ":" .. w.state .. ":" .. w.color .. (w.active and "*" or "")
+    end
     return table.concat(parts, ",")
 end
 
@@ -613,22 +673,43 @@ local function menu()
     return items
 end
 
+-- An attached menu swallows the item's click callback. Keep it on a hidden item instead,
+-- so the visible title can distinguish the trailing arrow from the dots and clock.
+local function clicked()
+    local point = hs.mouse.absolutePosition()
+    local frame = menubar:frame()
+    if arrowWidth > 0 and frame and point.x >= frame.x + frame.w - arrowWidth
+        and point.x <= frame.x + frame.w then
+        compactOverride = not compact
+        refresh()
+    else
+        dropdown:setMenu(menu())
+        dropdown:popupMenu(point)
+    end
+end
+
 local function draw()
     local windows = agentWindows() or {} -- tmux down: still show the mode and the clock
     local mode, since = readMode()
 
-    local key = { mode, clock(since), "L=" .. windowsKey(windows) }
+    local widthLimit = titleWidthLimit()
+    local key = { mode, clock(since), tostring(compactOverride), tostring(widthLimit), "L=" .. windowsKey(windows) }
     for _, seg in ipairs(segments) do
         local r = remote[seg.host]
         key[#key + 1] = seg.kind .. ":" .. seg.host .. "=" .. (r.ok and windowsKey(windowsForSegment(seg)) or ("err:" .. tostring(r.err)))
     end
     key = table.concat(key, " ")
     if key == lastKey then return end
-    lastKey = key
-
+    local text = title(mode, windows, since, false)
+    compact = mode ~= "dnd" and (compactOverride == true
+        or (compactOverride == nil and hs.drawing.getTextDrawingSize(text).w + 16 > widthLimit))
+    if compact then text = title(mode, windows, since, true) end
+    -- Include the space before the arrow and the native status item's right inset.
+    arrowWidth = mode == "dnd" and 0 or hs.drawing.getTextDrawingSize(label(" >")).w + 8
     if not menubar:isInMenuBar() then menubar:returnToMenuBar() end
-    menubar:setTitle(title(mode, windows, since))
-    note("drawn " .. key)
+    menubar:setTitle(text)
+    lastKey = key
+    note("drawn " .. (compact and "compact " or "expanded ") .. key)
 end
 
 refresh = function()
@@ -653,7 +734,8 @@ os.execute("mkdir -p " .. HOME .. "/.cache " .. MODE_DIR)
 local ok, err = pcall(function()
     REMOTE_B64 = hs.base64.encode(REMOTE_SCRIPT):gsub("%s+", "")
     menubar = hs.menubar.new()
-    menubar:setMenu(menu)
+    dropdown = hs.menubar.new(false)
+    menubar:setClickCallback(clicked)
 end)
 if ok then
     note("loaded")
@@ -667,7 +749,7 @@ end
 
 -- Returned so `require` keeps the timers and menubar referenced (Hammerspoon garbage-collects
 -- unreferenced timers). The rest is exposed for the offline harness.
-return { menubar = menubar, timer = timer, remoteTimer = remoteTimer, refresh = refresh, agentWindows = agentWindows,
+return { menubar = menubar, dropdown = dropdown, timer = timer, remoteTimer = remoteTimer, refresh = refresh, agentWindows = agentWindows,
          styleColor = styleColor, menu = menu, setMode = setMode, readMode = readMode, vscodeHosts = vscodeHosts, pollAll = pollAll,
          applyPoll = applyPoll, jumpRemote = jumpRemote, remote = remote, sshLinks = sshLinks,
          remoteHosts = function() return remoteHostList end, segments = function() return segments end }
