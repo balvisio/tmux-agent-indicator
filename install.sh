@@ -47,7 +47,7 @@ if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/agent-indicator.tmux" ]; then
         exit 1
     fi
 fi
-TARGET_DIR="${TMUX_AGENT_INSTALL_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}"
+TARGET_DIR="$HOME/.tmux/plugins/tmux-agent-indicator"
 INSTALL_CLAUDE=true
 INSTALL_CODEX=true
 INSTALL_OPENCODE=true
@@ -64,7 +64,6 @@ usage() {
 Usage: install.sh [OPTIONS]
 
 Options:
-  --target-dir <path>  Install path (default: ~/.tmux/plugins/tmux-agent-indicator)
   --no-claude          Skip Claude hooks setup
   --no-codex           Skip Codex hooks setup
   --no-opencode        Skip OpenCode plugin setup
@@ -81,11 +80,6 @@ EOF
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --target-dir)
-            [ "$#" -lt 2 ] && usage && exit 1
-            TARGET_DIR="$2"
-            shift 2
-            ;;
         --no-claude)
             INSTALL_CLAUDE=false
             shift
@@ -178,30 +172,44 @@ fi
 TMUX_CONF="$HOME/.tmux.conf"
 AGENT_CONF="$HOME/.tmux/agent-indicator.conf"
 SOURCE_LINE="source-file ~/.tmux/agent-indicator.conf"
-MARKER="# tmux-agent-indicator"
+TAG="managed by tmux-agent-indicator install.sh"   # every line the installer adds to a shared file ends with it
+OWNED="$HOME/.tmux/agent-indicator.installed"        # files the installer created outside the plugin directory
 ALIAS_LINE="alias codex='codex --no-daemon'"
 HS_DIR="$HOME/.hammerspoon"
 HS_MODULE="$HS_DIR/agent_dots.lua"
 HS_REQUIRE='require("agent_dots")'
 
-# Remove the marker-tagged lines the installer added to a shared file (startup files, init.lua, .tmux.conf).
-remove_marked_lines() {
+# Remove the tagged lines the installer added to a shared file (startup files, init.lua, .tmux.conf).
+remove_tagged_lines() {
     local file="$1" tmp
     [ -f "$file" ] || return 0
-    grep -qF "$MARKER" "$file" || return 0
+    grep -qF "$TAG" "$file" || return 0
     tmp="$(mktemp)"
-    grep -vF "$MARKER" "$file" > "$tmp" || true
+    grep -vF "$TAG" "$file" > "$tmp" || true
     cat "$tmp" > "$file"
     rm -f "$tmp"
 }
 
+# Record a file as installer-owned; a pre-existing file that is not ours is kept as a dated backup.
+own_file() {
+    local file="$1"
+    if [ -f "$file" ] && ! grep -qxF "$file" "$OWNED" 2>/dev/null; then
+        cp -p "$file" "$file.bak-$(date +%Y%m%d%H%M%S)"
+        echo "Kept your previous $file as a .bak copy"
+    fi
+    grep -qxF "$file" "$OWNED" 2>/dev/null || echo "$file" >> "$OWNED"
+}
+
 if [ "$UNINSTALL_ALL" = true ]; then
-    remove_marked_lines "$TMUX_CONF"
-    rm -f "$AGENT_CONF"
-    for f in "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do remove_marked_lines "$f"; done
-    remove_marked_lines "$HS_DIR/init.lua"
-    rm -f "$HS_MODULE"
-    echo "Removed ~/.tmux/agent-indicator.conf, the source-file line, the codex alias and the Hammerspoon module"
+    for f in "$TMUX_CONF" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HS_DIR/init.lua"; do
+        remove_tagged_lines "$f"
+    done
+    if [ -f "$OWNED" ]; then
+        while IFS= read -r f; do
+            [ -n "$f" ] && rm -f "$f" && echo "Removed $f"
+        done < "$OWNED"
+        rm -f "$OWNED"
+    fi
 fi
 
 # A symlink here points at a development checkout: replace the link, never write through it.
@@ -222,38 +230,57 @@ if [ "$UNINSTALL_ALL" = false ]; then
     cp "$SCRIPT_DIR/hooks/"*.json "$TARGET_DIR/hooks/"
     cp "$SCRIPT_DIR/plugins/"*.js "$TARGET_DIR/plugins/"
     cp "$SCRIPT_DIR/config/agent-indicator.conf" "$TARGET_DIR/config/"
+    cp "$SCRIPT_DIR/install.sh" "$TARGET_DIR/"
     cp "$SCRIPT_DIR/integrations/hammerspoon/agent_dots.lua" "$TARGET_DIR/integrations/hammerspoon/"
 
-    chmod +x "$TARGET_DIR/agent-indicator.tmux" "$TARGET_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"*.py
+    chmod +x "$TARGET_DIR/agent-indicator.tmux" "$TARGET_DIR/install.sh" "$TARGET_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"*.py
 fi
 
 if [ "$INSTALL_TMUX_CONF" = true ]; then
     mkdir -p "$HOME/.tmux"
+    own_file "$AGENT_CONF"
     cp "$TARGET_DIR/config/agent-indicator.conf" "$AGENT_CONF"
     if [ ! -f "$TMUX_CONF" ] || ! grep -qF "$SOURCE_LINE" "$TMUX_CONF"; then
-        printf '\n%s   %s\n' "$SOURCE_LINE" "$MARKER" >> "$TMUX_CONF"
+        printf '\n%s   # %s\n' "$SOURCE_LINE" "$TAG" >> "$TMUX_CONF"
     fi
     echo "tmux config -> $AGENT_CONF (sourced from $TMUX_CONF)"
 fi
 
 if [ "$INSTALL_ALIAS" = true ] && command -v codex >/dev/null 2>&1; then
     # Bash login shells (macOS terminals) read .bash_profile, other Bash shells .bashrc, Zsh .zshrc.
-    # Only files that already exist are touched, and a user's own codex alias is left alone.
+    # Existing files get the line; with none, the file the platform's default shell reads is created.
+    # A codex alias the user wrote is left alone.
+    startup_files=()
     for f in "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
-        [ -f "$f" ] || continue
-        grep -qE "^[[:space:]]*alias codex=" "$f" && continue
-        printf '\n%s   %s\n' "$ALIAS_LINE" "$MARKER" >> "$f"
+        [ -f "$f" ] && startup_files+=("$f")
+    done
+    if [ "${#startup_files[@]}" -eq 0 ]; then
+        case "$(uname -s):${SHELL:-}" in
+            *zsh) startup_files=("$HOME/.zshrc") ;;
+            Darwin:*) startup_files=("$HOME/.bash_profile") ;;
+            *) startup_files=("$HOME/.bashrc") ;;
+        esac
+    fi
+    for f in "${startup_files[@]}"; do
+        [ -f "$f" ] && grep -qE "^[[:space:]]*alias codex=" "$f" && continue
+        printf '\n%s   # %s\n' "$ALIAS_LINE" "$TAG" >> "$f"
         echo "codex alias -> $f"
     done
 fi
 
-if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ] && [ -d "$HS_DIR" ]; then
-    cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
-    touch "$HS_DIR/init.lua"
-    if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
-        printf '\n%s   -- %s\n' "$HS_REQUIRE" "${MARKER#\# }" >> "$HS_DIR/init.lua"
+if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ]; then
+    if [ -d "$HS_DIR" ] || [ -d /Applications/Hammerspoon.app ] || [ -d "$HOME/Applications/Hammerspoon.app" ]; then
+        mkdir -p "$HS_DIR"
+        own_file "$HS_MODULE"
+        cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
+        touch "$HS_DIR/init.lua"
+        if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
+            printf '\n%s   -- %s\n' "$HS_REQUIRE" "$TAG" >> "$HS_DIR/init.lua"
+        fi
+        echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
+    else
+        echo "Hammerspoon not found: install it (brew install --cask hammerspoon) and run the installer again for the menu-bar item"
     fi
-    echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
 fi
 
 if [ "$INSTALL_CLAUDE" = true ] || [ "$UNINSTALL_CLAUDE" = true ]; then
@@ -552,12 +579,17 @@ fi
 if [ "$UNINSTALL_ALL" = false ]; then
     echo "Installed/updated tmux-agent-indicator in $TARGET_DIR"
     if [ "$INSTALL_TMUX_CONF" = true ] && tmux info >/dev/null 2>&1; then
-        # Reload only the plugin config: sourcing a whole ~/.tmux.conf can re-run new-session lines.
-        if tmux source-file "$AGENT_CONF" 2>/dev/null; then
-            echo "Running tmux server reloaded ($AGENT_CONF)"
+        # Reload the plugin config, then the user's own `set` lines that follow the source-file line in
+        # ~/.tmux.conf, so overrides keep applying. The whole ~/.tmux.conf is not sourced: it may hold
+        # commands such as new-session that must not run twice.
+        overrides="$(mktemp)"
+        awk -v line="$SOURCE_LINE" 'found && /^[[:space:]]*set(-option|-window-option|w)?[[:space:]]/ { print } index($0, line) { found = 1 }' "$TMUX_CONF" > "$overrides" 2>/dev/null || true
+        if tmux source-file "$AGENT_CONF" 2>/dev/null && tmux source-file "$overrides" 2>/dev/null; then
+            echo "Running tmux server reloaded"
         else
             echo "Reload the running tmux server with: tmux source-file $AGENT_CONF"
         fi
+        rm -f "$overrides"
     fi
     echo "Codex: start new sessions from a new shell (alias) and run /hooks once to trust the hooks."
 fi

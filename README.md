@@ -1,7 +1,5 @@
 # tmux-agent-indicator
 
-[![CI](https://github.com/balvisio/tmux-agent-indicator/actions/workflows/ci.yml/badge.svg)](https://github.com/balvisio/tmux-agent-indicator/actions/workflows/ci.yml)
-
 tmux window titles, pane borders and a macOS menu-bar item that follow the state of the Claude Code
 and Codex sessions running in your panes: running, needs input, done, idle.
 
@@ -23,9 +21,10 @@ Or from a checkout: `./install.sh`. The installer
 - writes `~/.tmux/agent-indicator.conf` and adds one `source-file` line to `~/.tmux.conf`
 - adds the Claude hooks to `~/.claude/settings.json` and the Codex hooks to `~/.codex/hooks.json`
 - adds `alias codex='codex --no-daemon'` to the shell startup files that exist (`~/.bash_profile`, `~/.bashrc`, `~/.zshrc`)
-- on macOS with Hammerspoon: copies `agent_dots.lua` to `~/.hammerspoon` and adds `require("agent_dots")` to `init.lua`
+- on macOS with Hammerspoon installed: copies `agent_dots.lua` to `~/.hammerspoon` and adds `require("agent_dots")` to `init.lua`
 - reloads the running tmux server
 
+A file of yours that the installer replaces is kept next to it as a dated `.bak` copy.
 Options: `--no-tmux-conf`, `--no-alias`, `--no-hammerspoon`, `--no-claude`, `--no-codex`, `--no-opencode`, `--uninstall`.
 
 ## Finish
@@ -69,9 +68,6 @@ Run the install command again. Then `/hooks` in Codex if a hook changed, and rel
 ~/.tmux/plugins/tmux-agent-indicator/install.sh --uninstall
 ```
 
-Removes the plugin, `~/.tmux/agent-indicator.conf`, the `source-file` line, the hooks, the alias and
-the Hammerspoon module. Your own `~/.tmux.conf`, startup files and `init.lua` keep everything else.
-
 ## Customize
 
 `~/.tmux/agent-indicator.conf` is overwritten on update. Put overrides in `~/.tmux.conf` after the
@@ -83,9 +79,14 @@ set -g @agent-indicator-needs-input-window-title-bg 'magenta'
 set -g @agent-indicator-done-window-title-bg 'red'
 ```
 
-Sounds off: `set -g @agent-indicator-notification-enabled 'off'`. Do Not Disturb (no sounds, colours
-unchanged): click the menu-bar item, or `echo "dnd $(date +%s)" > ~/.local/state/agent-dots/mode`.
-The full option list is in the reference below.
+To turn the sounds off for good:
+
+```tmux
+set -g @agent-indicator-notification-enabled 'off'
+```
+
+To silence them for a while, click the menu-bar item and choose **Do Not Disturb**. The colours keep
+working. Every other option is listed in the reference below.
 
 ## Reference
 

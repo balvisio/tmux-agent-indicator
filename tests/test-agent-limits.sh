@@ -88,19 +88,19 @@ settings_command() {
 }
 
 original=$(settings_command "$TEST_DIR/claude/settings.json")
-CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
-    --target-dir "$TEST_DIR/plugin" --no-codex --no-opencode >/dev/null
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
+    --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
 first=$(settings_command "$TEST_DIR/claude/settings.json")
-CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
-    --target-dir "$TEST_DIR/plugin" --no-codex --no-opencode >/dev/null
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
+    --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
 second=$(settings_command "$TEST_DIR/claude/settings.json")
 [ "$first" = "$second" ] || {
     echo "FAIL: Claude status-line wrapper nested during reinstall"
     exit 1
 }
 
-CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
-    --target-dir "$TEST_DIR/plugin" --uninstall-claude --no-codex --no-opencode >/dev/null
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
+    --uninstall-claude --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
 restored=$(settings_command "$TEST_DIR/claude/settings.json")
 [ "$restored" = "$original" ] || {
     echo "FAIL: Claude status-line command was not restored: $restored"
