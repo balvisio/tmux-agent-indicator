@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/balvisio/tmux-agent-indicator/main/
 Or from a checkout: `./install.sh`. The installer
 
 - copies the plugin to `~/.tmux/plugins/tmux-agent-indicator`
-- writes `~/.tmux/agent-indicator.conf` and adds one `source-file` line to `~/.tmux.conf`
+- writes `~/.tmux/agent-indicator.conf` and adds one `source-file` line to `~/.tmux.conf`; your settings go in `~/.tmux/agent-indicator.local.conf`
 - adds the Claude hooks to `~/.claude/settings.json` and the Codex hooks to `~/.codex/hooks.json`
 - adds `alias codex='codex --no-daemon'` to the shell startup files that exist (`~/.bash_profile`, `~/.bashrc`, `~/.zshrc`)
 - on macOS with Hammerspoon installed: copies `agent_dots.lua` to `~/.hammerspoon` and adds `require("agent_dots")` to `init.lua`
@@ -70,8 +70,8 @@ Run the install command again. Then `/hooks` in Codex if a hook changed, and rel
 
 ## Customize
 
-`~/.tmux/agent-indicator.conf` is overwritten on update. Put overrides in `~/.tmux.conf` after the
-`source-file` line; a later `set` wins. Colours per state:
+Put your settings in `~/.tmux/agent-indicator.local.conf`. It is loaded after the defaults and never
+touched by the installer. Colours per state:
 
 ```tmux
 set -g @agent-indicator-running-window-title-bg 'yellow'

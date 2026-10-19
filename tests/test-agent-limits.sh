@@ -88,10 +88,12 @@ settings_command() {
 }
 
 original=$(settings_command "$TEST_DIR/claude/settings.json")
-HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" CODEX_CONFIG_DIR="$TEST_DIR/codex" \
+    XDG_CONFIG_HOME="$TEST_DIR/xdg" "$ROOT_DIR/install.sh" \
     --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
 first=$(settings_command "$TEST_DIR/claude/settings.json")
-HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" CODEX_CONFIG_DIR="$TEST_DIR/codex" \
+    XDG_CONFIG_HOME="$TEST_DIR/xdg" "$ROOT_DIR/install.sh" \
     --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
 second=$(settings_command "$TEST_DIR/claude/settings.json")
 [ "$first" = "$second" ] || {
@@ -99,8 +101,9 @@ second=$(settings_command "$TEST_DIR/claude/settings.json")
     exit 1
 }
 
-HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" "$ROOT_DIR/install.sh" \
-    --uninstall-claude --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" CODEX_CONFIG_DIR="$TEST_DIR/codex" \
+    XDG_CONFIG_HOME="$TEST_DIR/xdg" "$ROOT_DIR/install.sh" \
+    --uninstall >/dev/null
 restored=$(settings_command "$TEST_DIR/claude/settings.json")
 [ "$restored" = "$original" ] || {
     echo "FAIL: Claude status-line command was not restored: $restored"

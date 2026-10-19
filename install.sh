@@ -71,9 +71,6 @@ Options:
   --no-alias           Do not add the `codex --no-daemon` alias to the shell startup files
   --no-hammerspoon     Do not install the macOS menu-bar module (~/.hammerspoon/agent_dots.lua)
   --uninstall          Remove everything the installer put in place (plugin, config, hooks, alias, module)
-  --uninstall-claude   Remove Claude hooks/status-line wrapper from ~/.claude/settings.json
-  --uninstall-codex    Remove tmux-agent-indicator Codex hooks from ~/.codex/hooks.json
-  --uninstall-opencode Remove tmux-agent-indicator OpenCode plugin from ~/.config/opencode/plugins/
   -h, --help           Show this help
 EOF
 }
@@ -117,21 +114,6 @@ while [ "$#" -gt 0 ]; do
             INSTALL_HAMMERSPOON=false
             shift
             ;;
-        --uninstall-claude)
-            UNINSTALL_CLAUDE=true
-            INSTALL_CLAUDE=false
-            shift
-            ;;
-        --uninstall-codex)
-            UNINSTALL_CODEX=true
-            INSTALL_CODEX=false
-            shift
-            ;;
-        --uninstall-opencode)
-            UNINSTALL_OPENCODE=true
-            INSTALL_OPENCODE=false
-            shift
-            ;;
         -h|--help)
             usage
             exit 0
@@ -173,7 +155,7 @@ TMUX_CONF="$HOME/.tmux.conf"
 AGENT_CONF="$HOME/.tmux/agent-indicator.conf"
 SOURCE_LINE="source-file ~/.tmux/agent-indicator.conf"
 TAG="managed by tmux-agent-indicator install.sh"   # every line the installer adds to a shared file ends with it
-OWNED="$HOME/.tmux/agent-indicator.installed"        # files the installer created outside the plugin directory
+OWNED="$HOME/.tmux/agent-indicator.installed"        # files created outside the plugin directory, and "line:<file>" for files that got a tagged line
 ALIAS_LINE="alias codex='codex --no-daemon'"
 HS_DIR="$HOME/.hammerspoon"
 HS_MODULE="$HS_DIR/agent_dots.lua"
@@ -200,13 +182,24 @@ own_file() {
     grep -qxF "$file" "$OWNED" 2>/dev/null || echo "$file" >> "$OWNED"
 }
 
+# Append a tagged line to a shared file and remember the file for uninstall.
+add_tagged_line() {
+    local file="$1" line="$2" comment="$3"
+    printf '\n%s   %s %s\n' "$line" "$comment" "$TAG" >> "$file"
+    grep -qxF "line:$file" "$OWNED" 2>/dev/null || echo "line:$file" >> "$OWNED"
+}
+
 if [ "$UNINSTALL_ALL" = true ]; then
-    for f in "$TMUX_CONF" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HS_DIR/init.lua"; do
+    for f in "$TMUX_CONF" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HS_DIR/init.lua"; do
         remove_tagged_lines "$f"
     done
     if [ -f "$OWNED" ]; then
         while IFS= read -r f; do
-            [ -n "$f" ] && rm -f "$f" && echo "Removed $f"
+            case "$f" in
+                "") ;;
+                line:*) remove_tagged_lines "${f#line:}" ;;
+                *) rm -f "$f" && echo "Removed $f" ;;
+            esac
         done < "$OWNED"
         rm -f "$OWNED"
     fi
@@ -241,29 +234,39 @@ if [ "$INSTALL_TMUX_CONF" = true ]; then
     own_file "$AGENT_CONF"
     cp "$TARGET_DIR/config/agent-indicator.conf" "$AGENT_CONF"
     if [ ! -f "$TMUX_CONF" ] || ! grep -qF "$SOURCE_LINE" "$TMUX_CONF"; then
-        printf '\n%s   # %s\n' "$SOURCE_LINE" "$TAG" >> "$TMUX_CONF"
+        add_tagged_line "$TMUX_CONF" "$SOURCE_LINE" "#"
     fi
     echo "tmux config -> $AGENT_CONF (sourced from $TMUX_CONF)"
 fi
 
 if [ "$INSTALL_ALIAS" = true ] && command -v codex >/dev/null 2>&1; then
-    # Bash login shells (macOS terminals) read .bash_profile, other Bash shells .bashrc, Zsh .zshrc.
-    # Existing files get the line; with none, the file the platform's default shell reads is created.
-    # A codex alias the user wrote is left alone.
+    # Every existing startup file gets the line, and so does the current shell's own file even when it
+    # does not exist yet. Zsh: ${ZDOTDIR}/.zshrc. Bash on macOS opens login shells, which read the first
+    # of .bash_profile, .bash_login, .profile that exists (only .bash_profile is created when none does);
+    # elsewhere .bashrc. A codex alias the user wrote is left alone.
     startup_files=()
-    for f in "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
         [ -f "$f" ] && startup_files+=("$f")
     done
-    if [ "${#startup_files[@]}" -eq 0 ]; then
-        case "$(uname -s):${SHELL:-}" in
-            *zsh) startup_files=("$HOME/.zshrc") ;;
-            Darwin:*) startup_files=("$HOME/.bash_profile") ;;
-            *) startup_files=("$HOME/.bashrc") ;;
-        esac
-    fi
+    case "${SHELL:-}" in
+        */zsh) startup_files+=("${ZDOTDIR:-$HOME}/.zshrc") ;;
+        */bash)
+            if [ "$(uname -s)" = Darwin ]; then
+                login_file="$HOME/.bash_profile"
+                for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+                    if [ -f "$f" ]; then login_file="$f"; break; fi
+                done
+                startup_files+=("$login_file")
+            else
+                startup_files+=("$HOME/.bashrc")
+            fi ;;
+    esac
+    seen_files=" "
     for f in "${startup_files[@]}"; do
+        case "$seen_files" in *" $f "*) continue ;; esac
+        seen_files="$seen_files$f "
         [ -f "$f" ] && grep -qE "^[[:space:]]*alias codex=" "$f" && continue
-        printf '\n%s   # %s\n' "$ALIAS_LINE" "$TAG" >> "$f"
+        add_tagged_line "$f" "$ALIAS_LINE" "#"
         echo "codex alias -> $f"
     done
 fi
@@ -275,7 +278,7 @@ if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ]; then
         cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
         touch "$HS_DIR/init.lua"
         if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
-            printf '\n%s   -- %s\n' "$HS_REQUIRE" "$TAG" >> "$HS_DIR/init.lua"
+            add_tagged_line "$HS_DIR/init.lua" "$HS_REQUIRE" "--"
         fi
         echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
     else
@@ -579,17 +582,14 @@ fi
 if [ "$UNINSTALL_ALL" = false ]; then
     echo "Installed/updated tmux-agent-indicator in $TARGET_DIR"
     if [ "$INSTALL_TMUX_CONF" = true ] && tmux info >/dev/null 2>&1; then
-        # Reload the plugin config, then the user's own `set` lines that follow the source-file line in
-        # ~/.tmux.conf, so overrides keep applying. The whole ~/.tmux.conf is not sourced: it may hold
+        # The defaults file ends by sourcing ~/.tmux/agent-indicator.local.conf, so the user's
+        # customizations are reloaded intact. The whole ~/.tmux.conf is not sourced: it may hold
         # commands such as new-session that must not run twice.
-        overrides="$(mktemp)"
-        awk -v line="$SOURCE_LINE" 'found && /^[[:space:]]*set(-option|-window-option|w)?[[:space:]]/ { print } index($0, line) { found = 1 }' "$TMUX_CONF" > "$overrides" 2>/dev/null || true
-        if tmux source-file "$AGENT_CONF" 2>/dev/null && tmux source-file "$overrides" 2>/dev/null; then
+        if tmux source-file "$AGENT_CONF" 2>/dev/null; then
             echo "Running tmux server reloaded"
         else
             echo "Reload the running tmux server with: tmux source-file $AGENT_CONF"
         fi
-        rm -f "$overrides"
     fi
     echo "Codex: start new sessions from a new shell (alias) and run /hooks once to trust the hooks."
 fi
