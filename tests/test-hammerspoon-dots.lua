@@ -30,7 +30,13 @@ styled.__concat = function(a, b)
     return setmetatable({text = a.text .. b.text, colors = colors}, styled)
 end
 styled.__index = {find = function(self, ...) return self.text:find(...) end}
+local hotkeyFn = nil
 hs = {
+    hotkey = {
+        bind = function(mods, key, fn) assert(key == 'F9' and mods[1] == 'cmd', key); hotkeyFn = fn; return {} end,
+        systemAssigned = function(mods, key) return key == 'F11' and {enabled = true} or nil end,
+        assignable = function() return true end,
+    },
     execute = function(command)
         if command:find('set-option -wq',1,true) then
             sshWrites = sshWrites + 1
@@ -96,6 +102,7 @@ hs = {
     task = {new = function() return {start=function() return false end,isRunning=function() return false end} end},
     host = {interfaceStyle=function() return 'Dark' end},
 }
+AGENT_DOTS = { hotkey = { mods = {'cmd'}, key = 'F9' } } -- init.lua-style override
 local dots = dofile(arg[1])
 assert(remoteScript:find('#{E:window-status-current-style}',1,true), 'remote poll must read actual title styles')
 assert(not remoteScript:find('__WINDOW_STYLE__',1,true), 'remote probe style placeholder was not expanded')
@@ -292,6 +299,12 @@ assert(shown:find('⛔',1,true) and shown:match('%d+:%d%d$'), 'DND must keep the
 clickFromRight(8)
 assert(popupCount == beforePopups + 3, 'DND must open the mode menu even at the right edge')
 dots.setMode('on')
+assert(hotkeyFn, 'toggle hotkey must be bound')
+hotkeyFn()
+assert(dots.readMode() == 'dnd', 'hotkey must switch On to Do Not Disturb')
+hotkeyFn()
+assert(dots.readMode() == 'on', 'hotkey must switch Do Not Disturb back to On')
+print('PASS: the hotkey toggles Do Not Disturb')
 assert(shown:match('%d+:%d%d  >$'), 'DND must preserve the chosen compact layout')
 print('PASS: automatic sizing, local/remote summary priority, direct arrow clicks, clock, and menu access')
 
@@ -347,3 +360,13 @@ if fixturesFile then
     fixturesFile:close()
     print('PASS: real tmux current, inactive, inherited, and last-window styles match dot colors')
 end
+
+-- A key macOS already uses must not be bound; the menu says so and still offers the mode switch.
+hotkeyFn = nil
+AGENT_DOTS = { hotkey = { mods = {}, key = 'F11' } }
+local busy = dofile(arg[1])
+assert(hotkeyFn == nil and busy.hotkey == nil, 'system shortcut must not be bound')
+local busyMenu = busy.menu()
+assert(busyMenu[1].title == 'On' and busyMenu[2].title == 'Do Not Disturb', 'mode controls must remain')
+assert(busyMenu[3].disabled and busyMenu[3].title:find('F11', 1, true), 'menu must report the unavailable key')
+print('PASS: a busy hotkey is reported in the menu instead of being bound')

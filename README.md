@@ -85,8 +85,15 @@ To turn the sounds off for good:
 set -g @agent-indicator-notification-enabled 'off'
 ```
 
-To silence them for a while, click the menu-bar item and choose **Do Not Disturb**. The colours keep
-working. Every other option is listed in the reference below.
+To silence them for a while, press **F10** or click the menu-bar item and choose **Do Not Disturb**;
+the same again switches back. The colours keep working. Another key goes in `~/.hammerspoon/init.lua`
+before the `require` line (`hotkey = false` for none):
+
+```lua
+AGENT_DOTS = { hotkey = { mods = {}, key = "F9" } }
+```
+
+Every other option is listed in the reference below.
 
 ## Reference
 

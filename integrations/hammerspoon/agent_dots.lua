@@ -51,6 +51,12 @@ local REFRESH = 2 -- seconds, local tmux + clock
 local REMOTE_REFRESH = 3 -- seconds, each VS Code host
 local REMOTE_TIMEOUT = 20 -- seconds before a hung ssh poll is killed
 local MAX_TITLE_WIDTH = 600 -- points, also limited to 30% of the narrowest connected screen
+-- Settings a user may override from init.lua before the require line, e.g.
+--   AGENT_DOTS = { hotkey = { mods = {}, key = "F9" } }   -- hotkey = false: no hotkey
+-- The installer overwrites this file on update; init.lua is left alone.
+local SETTINGS = type(rawget(_G, "AGENT_DOTS")) == "table" and AGENT_DOTS or {}
+local TOGGLE_HOTKEY = { mods = {}, key = "F10" } -- switches On <-> Do Not Disturb
+if SETTINGS.hotkey == false then TOGGLE_HOTKEY = {} elseif type(SETTINGS.hotkey) == "table" then TOGGLE_HOTKEY = SETTINGS.hotkey end
 local HOME = os.getenv("HOME")
 local STATE_FILE = HOME .. "/.cache/agent_dots.state"
 local MODE_DIR = HOME .. "/.local/state/agent-dots"
@@ -220,6 +226,8 @@ exit 0
 REMOTE_SCRIPT = REMOTE_SCRIPT:gsub("__WINDOW_STYLE__", function() return WINDOW_STYLE end)
 
 local menubar, dropdown = nil, nil -- one visible item; a separate, hidden item supplies the popup menu
+local hotkey = nil -- kept referenced so the binding survives garbage collection
+local hotkeyNote = nil -- why the hotkey is not active, shown in the menu
 local timer, remoteTimer = nil, nil
 local lastKey = nil -- fingerprint of what is currently drawn, to skip redundant redraws
 local compactOverride = nil -- start with automatic sizing; arrow clicks override until reload
@@ -668,8 +676,9 @@ local function menu()
     local items = {
         { title = MODES.on, checked = (mode == "on"), fn = function() setMode("on") end },
         { title = MODES.dnd, checked = (mode == "dnd"), fn = function() setMode("dnd") end },
-        { title = "-" },
     }
+    if hotkeyNote then table.insert(items, { title = hotkeyNote, disabled = true }) end
+    table.insert(items, { title = "-" })
     local attrs = menuTextAttrs()
     local windows = agentWindows()
     for _, w in ipairs(windows or {}) do
@@ -773,6 +782,22 @@ local ok, err = pcall(function()
     menubar = hs.menubar.new()
     dropdown = hs.menubar.new(false)
     menubar:setClickCallback(clicked)
+    -- Bind the toggle only when the key is free: not a macOS system shortcut, not refused by the
+    -- OS. A busy key leaves the menu as the way to switch modes and is reported there.
+    if TOGGLE_HOTKEY.key then
+        local mods, key = TOGGLE_HOTKEY.mods or {}, TOGGLE_HOTKEY.key
+        local name = (#mods > 0 and table.concat(mods, "+") .. "+" or "") .. key
+        local taken = hs.hotkey.systemAssigned and hs.hotkey.systemAssigned(mods, key)
+        if taken and taken.enabled ~= false then
+            hotkeyNote = name .. " is a macOS shortcut; no toggle key"
+        elseif hs.hotkey.assignable and not hs.hotkey.assignable(mods, key) then
+            hotkeyNote = name .. " cannot be bound; no toggle key"
+        else
+            hotkey = hs.hotkey.bind(mods, key, function() setMode(readMode() == "dnd" and "on" or "dnd") end)
+            if not hotkey then hotkeyNote = name .. " is already in use; no toggle key" end
+        end
+        if hotkeyNote then note(hotkeyNote) end
+    end
 end)
 if ok then
     note("loaded")
@@ -786,7 +811,7 @@ end
 
 -- Returned so `require` keeps the timers and menubar referenced (Hammerspoon garbage-collects
 -- unreferenced timers). The rest is exposed for the offline harness.
-return { menubar = menubar, dropdown = dropdown, timer = timer, remoteTimer = remoteTimer, refresh = refresh, agentWindows = agentWindows,
+return { menubar = menubar, dropdown = dropdown, hotkey = hotkey, timer = timer, remoteTimer = remoteTimer, refresh = refresh, agentWindows = agentWindows,
          styleColor = styleColor, menu = menu, setMode = setMode, readMode = readMode, vscodeHosts = vscodeHosts, pollAll = pollAll,
          applyPoll = applyPoll, jumpRemote = jumpRemote, remote = remote, sshLinks = sshLinks,
          remoteHosts = function() return remoteHostList end, segments = function() return segments end }
