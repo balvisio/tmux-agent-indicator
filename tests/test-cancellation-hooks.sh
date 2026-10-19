@@ -36,7 +36,26 @@ tmux_cmd set -g @agent-indicator-style-active-window on
 run_state needs-input
 other_style=$(get_window_option "$WIN" window-status-style)
 
-for agent in codex claude; do
+for agent in claude codex; do
+    # Claude executes matching hooks in parallel, so a valid completion order is
+    # the reverse of their configuration order. No late reset may erase running.
+    prompt_command=$(python3 - "$ROOT_DIR/hooks/$agent-hooks.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as stream:
+    entries = json.load(stream)["hooks"]["UserPromptSubmit"]
+commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+print("\n".join(reversed(commands)))
+PY
+    )
+    [ "$agent" != claude ] || prompt_command="export TMUX_PANE=$source_pane; $prompt_command"
+    for state in off running needs-input done; do
+        run_in_pane "TMUX_PANE=$source_pane \"$ROOT_DIR/scripts/agent-state.sh\" --agent $agent --state $state"
+        run_in_pane "$prompt_command"
+        [ "$(get_env "TMUX_AGENT_PANE_${source_pane}_STATE")" = running ] || fail "$agent prompt hooks must leave the pane running from $state, regardless of execution order"
+        [ "$(get_window_option "$source_window" window-status-style)" = bg=yellow,fg=black ] || fail "$agent prompt must show running styling"
+        [ "$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")" = needs-input ] || fail "prompt must preserve another agent's waiting state"
+    done
     events=SessionEnd
     [ "$agent" != codex ] || events="Interrupt SessionEnd"
     for event in $events; do
@@ -79,4 +98,4 @@ tmux_cmd bind-key -n C-c display-message custom-interrupt
 tmux_cmd run-shell "$ROOT_DIR/agent-indicator.tmux"
 tmux_cmd list-keys -T root | grep -q custom-interrupt || fail "custom Ctrl+C binding must survive reload"
 
-pass "cancellation hooks and Claude Ctrl+C fallback clear only their source pane"
+pass "prompt hooks preserve running state; cancellation hooks clear only their source pane"

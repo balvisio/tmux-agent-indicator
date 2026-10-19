@@ -492,6 +492,10 @@ They map:
 - `SessionEnd` -> `off`
 - Codex `Interrupt` -> `off` when an active turn is canceled
 
+Prompt submission uses a single `running` update, which replaces the previous pane state under
+the same lock. Claude runs matching hooks in parallel, so a separate `off` hook could finish last
+and incorrectly clear an active turn. Reinstalling replaces older plugin hook entries with this template.
+
 Codex hooks must be reviewed and trusted with `/hooks` before they can run.
 
 Claude does not fire `Stop` when a turn is interrupted. The tmux plugin binds Ctrl+C to forward
