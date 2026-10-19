@@ -267,10 +267,10 @@ restore_active_border_style() {
 
 # Style panes via the pane-scoped window-style option rather than
 # `select-pane -P`: select-pane also makes the target pane the active pane,
-# which steals focus when the styled pane shares the user's current window.
-# The previous capture/restore dance raced with user navigation and could
-# resolve the wrong "active" pane when run without a client context (e.g.
-# from agent hooks). set-option -p has no focus side effect at all.
+# which steals focus when the styled pane shares the user's current window;
+# capturing and restoring the active pane around it races with user navigation
+# and has no reliable "active" pane without a client context (e.g. from agent
+# hooks). set-option -p has no focus side effect at all.
 reset_pane_style() {
     local pane_id="$1"
     tmux set-option -p -t "$pane_id" window-style "bg=default"

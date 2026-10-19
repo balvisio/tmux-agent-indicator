@@ -52,7 +52,7 @@ originating pane/window should change. Focus a pending permission prompt and con
 `needs-input` color remains until the agent reports its next state.
 
 Cancel an active turn with Ctrl+C in both agents and confirm its state and colors clear.
-Codex requires the new `Interrupt` hook to be trusted in `/hooks`; Claude uses the plugin's
+Codex requires the `Interrupt` hook to be trusted in `/hooks`; Claude uses the plugin's
 Ctrl+C binding. Exiting either agent must also clear state through `SessionEnd`.
 
 Check live provider limits without the tmux cache:
