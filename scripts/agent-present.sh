@@ -135,7 +135,7 @@ paint() {
 }
 
 sweep() {
-    local window_id flag ssh_flag label host current changed=0
+    local window_id flag ssh_flag label host current session_id owner changed=0
     while IFS='|' read -r window_id flag ssh_flag; do
         label=$(window_label "$window_id")
         if [ -n "$label" ]; then
@@ -163,6 +163,11 @@ sweep() {
             changed=1
         fi
     done < <(tmux list-windows -a -F '#{window_id}|#{@agent_present}|#{@ssh_host}')
+    # Recheck the owning pane under the writer lock, after pruning stale reconnect markers.
+    while read -r session_id owner; do
+        [ -n "$owner" ] || continue
+        "$script_dir/ssh-passthrough.sh" check "$session_id"
+    done < <(tmux list-sessions -F '#{session_id} #{@ssh_passthrough_pane}')
     [ "$changed" = "1" ] && tmux refresh-client -S >/dev/null 2>&1
     return 0
 }

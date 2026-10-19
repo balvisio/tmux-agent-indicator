@@ -26,6 +26,7 @@ tests=(
     "$ROOT_DIR/tests/test-running-animation.sh"
     "$ROOT_DIR/tests/test-ssh-reconnect.sh"
     "$ROOT_DIR/tests/test-install-startup-lines.sh"
+    "$ROOT_DIR/tests/test-ssh-passthrough.sh"
 )
 
 for test_script in "${tests[@]}"; do

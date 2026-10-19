@@ -5,7 +5,7 @@ This guide defines repeatable checks for `tmux-agent-indicator` in automated and
 ## Prerequisites
 
 - Run from repository root.
-- `tmux` is installed.
+- tmux 3.6 or newer is installed.
 - Plugin loaded with `run-shell '/path/to/agent-indicator.tmux'` (or TPM).
 
 ## Automated Mode (Isolated tmux server)
@@ -39,12 +39,20 @@ Run individual checks:
 ./tests/test-cancellation-hooks.sh
 ./tests/test-notification-command.sh
 ./tests/test-running-animation.sh
+./tests/test-ssh-reconnect.sh
+./tests/test-install-startup-lines.sh
+./tests/test-ssh-passthrough.sh
 ```
 
 The ancestry test launches hooks inside two separate panes while an unrelated window stays selected.
 It checks all four states with both a missing `TMUX_PANE` and a stale value naming the unrelated pane.
 The originating windows must receive the updates and the unrelated window must remain unchanged.
 It also checks that detached Codex hooks are ignored despite a valid, stale `TMUX_PANE`.
+
+The passthrough test checks keyboard-setting restoration, unchanged agent colours across window
+changes, plain SSH exit, reconnect retries and exit-triggered sweeps, and stale or closed owner panes.
+For a visual check, enable the README's F12 bindings in an isolated test session: the bar should turn
+orange while agent titles keep their colours, then return to its original style when passthrough ends.
 
 For live Codex checks, launch two fresh `codex --no-daemon` sessions in separate panes.
 Check `running`, `needs-input`, and `done` while a third window is selected: only the

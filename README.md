@@ -5,7 +5,7 @@ and Codex sessions running in your panes: running, needs input, done, idle.
 
 ## Requirements
 
-- tmux 3.1+, bash 4+, Python 3, autossh (`brew install autossh`) for `ssh-reconnect`
+- tmux 3.6+, bash 4+, Python 3, autossh (`brew install autossh`) for `ssh-reconnect`
 - Claude Code and/or Codex on the machine
 - macOS extras: Hammerspoon (`brew install --cask hammerspoon`) for the menu-bar item
 
@@ -99,6 +99,27 @@ AGENT_DOTS = { hotkey = { mods = {}, key = "F9" } }
 ```
 
 Every other option is listed in the reference below.
+
+### Keyboard passthrough to a remote tmux
+
+With a tmux running on the remote side, one key can hand it the keyboard (prefix and shortcuts
+included) and take it back. Add to `~/.tmux/agent-indicator.local.conf`, with the key of your choice:
+
+```tmux
+bind -T root F12 run-shell "~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-passthrough.sh on '#{session_id}' '#{pane_id}'" \; display-message "keys go to the remote tmux"
+bind -T off  F12 run-shell "~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-passthrough.sh off '#{session_id}'" \; display-message "keys are local again"
+```
+
+The status bar turns orange while keys go through; agent window colours keep their states. Press
+the same key to restore local controls. Exiting `ssh-reconnect` also restores them; plain `ssh`
+is checked on each sweep, normally within five seconds. Passthrough stays on during reconnection.
+Both prefix keys and the key table return to their previous settings.
+
+To change the bar colour, add this to the same file, setting both `bg` and `fill` to your colour:
+
+```tmux
+set -g @ssh_passthrough_status_style 'fg=black,bg=colour208,fill=colour208,bold'
+```
 
 ## Reference
 
