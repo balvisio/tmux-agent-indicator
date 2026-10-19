@@ -46,7 +46,7 @@ Add this format helper to `.tmux.conf`, then prepend `#{E:@ssh_agent_title_style
 existing `window-status-format` and `window-status-current-format` values:
 
 ```tmux
-set -g @ssh_agent_title_style '#{?#{&&:#{==:#{pane_current_command},ssh},#{&&:#{==:#{@agent_label},},#{&&:#{==:#{@ssh_host},#{@ssh_agent_host}},#{@ssh_agent_color}}}},#[bg=#{@ssh_agent_color}#,fg=black#,noreverse],}'
+set -g @ssh_agent_title_style '#{?#{&&:#{==:#{pane_current_command},ssh},#{&&:#{==:#{@agent_label},},#{&&:#{==:#{@ssh_host},#{@ssh_agent_host}},#{@ssh_agent_color}}}},#[bg=#{@ssh_agent_color}#,fg=#{?#{==:#{@ssh_agent_color},blue},white,black}#,noreverse],}'
 ```
 
 Reload `.tmux.conf` and Hammerspoon after updating the module. The helper colors the SSH title's
