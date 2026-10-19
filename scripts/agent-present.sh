@@ -109,16 +109,22 @@ pane_ssh_host() {
           } }' | head -n 1
 }
 
-# First ssh destination among a window's panes; empty if none.
+# First ssh destination among a window's panes; empty if none. A pane whose ssh-reconnect.sh is
+# between attempts has no ssh process but keeps its @ssh_reconnect_host while that launcher lives;
+# a marker whose owner is gone (crash, kill) is removed here.
 window_ssh_host() {
-    local pane_id pane_pid tty host
-    while read -r pane_id pane_pid tty; do
-        host=$(pane_ssh_host "$pane_pid" "$tty")
-        if [ -n "$host" ]; then
-            printf '%s' "$host"
-            return 0
+    local pane_id pane_pid tty marker marker_pid host found=""
+    while IFS='|' read -r pane_id pane_pid tty marker marker_pid; do
+        if [ -n "$marker" ] && ! { [ -n "$marker_pid" ] && kill -0 "$marker_pid" 2>/dev/null; }; then
+            tmux set-option -pqu -t "$pane_id" @ssh_reconnect_host \; set-option -pqu -t "$pane_id" @ssh_reconnect_pid 2>/dev/null
+            marker=""
         fi
-    done < <(tmux list-panes -t "$1" -F '#{pane_id} #{pane_pid} #{pane_tty}')
+        [ -n "$found" ] && continue
+        host=$(pane_ssh_host "$pane_pid" "$tty")
+        [ -n "$host" ] || host="$marker"
+        [ -n "$host" ] && found="$host"
+    done < <(tmux list-panes -t "$1" -F '#{pane_id}|#{pane_pid}|#{pane_tty}|#{@ssh_reconnect_host}|#{@ssh_reconnect_pid}')
+    printf '%s' "$found"
     return 0
 }
 

@@ -68,7 +68,7 @@ Options:
   --no-codex           Skip Codex hooks setup
   --no-opencode        Skip OpenCode plugin setup
   --no-tmux-conf       Do not install ~/.tmux/agent-indicator.conf or touch ~/.tmux.conf
-  --no-alias           Do not add the `codex --no-daemon` alias to the shell startup files
+  --no-alias           Do not add the codex and ssh-reconnect aliases to the shell startup files
   --no-hammerspoon     Do not install the macOS menu-bar module (~/.hammerspoon/agent_dots.lua)
   --uninstall          Remove everything the installer put in place (plugin, config, hooks, alias, module)
   -h, --help           Show this help
@@ -157,6 +157,11 @@ SOURCE_LINE="source-file ~/.tmux/agent-indicator.conf"
 TAG="managed by tmux-agent-indicator install.sh"   # every line the installer adds to a shared file ends with it
 OWNED="$HOME/.tmux/agent-indicator.installed"        # files created outside the plugin directory, and "line:<file>" for files that got a tagged line
 ALIAS_LINE="alias codex='codex --no-daemon'"
+RECONNECT_ALIAS="alias ssh-reconnect='$HOME/.tmux/plugins/tmux-agent-indicator/scripts/ssh-reconnect.sh'"
+# Bash-only code behind a guard, because .profile and .bash_login are read by other shells too:
+# interactive ($- has i) Bash that is neither in POSIX mode (SHELLOPTS) nor invoked as sh ($0).
+RECONNECT_COMPLETION_BASH="if [ -n \"\${BASH_VERSION:-}\" ] && [ -r ~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-reconnect-completion.sh ]; then case \"\$-\" in *i*) case \":\${SHELLOPTS:-}:/\${0##*/}\" in *:posix:*|*/sh|*/-sh) ;; *) . ~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-reconnect-completion.sh ;; esac ;; esac; fi"
+RECONNECT_COMPLETION_ZSH="_ssh_reconnect() { local -a h; h=(\${(f)\"\$(~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-hosts.sh)\"}); _describe host h; }; if (( \$+functions[compdef] )); then compdef _ssh_reconnect ssh-reconnect; fi"
 HS_DIR="$HOME/.hammerspoon"
 HS_MODULE="$HS_DIR/agent_dots.lua"
 HS_REQUIRE='require("agent_dots")'
@@ -182,10 +187,23 @@ own_file() {
     grep -qxF "$file" "$OWNED" 2>/dev/null || echo "$file" >> "$OWNED"
 }
 
-# Append a tagged line to a shared file and remember the file for uninstall.
-add_tagged_line() {
-    local file="$1" line="$2" comment="$3"
-    printf '\n%s   %s %s\n' "$line" "$comment" "$TAG" >> "$file"
+# Installer-owned line in a shared file, remembered for uninstall. Added once; when the installer
+# ships a newer version of the same entry, the old one (found by the tag plus a needle only that
+# entry contains) is replaced instead of a second line being added.
+put_tagged_line() {
+    local file="$1" needle="$2" line="$3" comment="$4" full tmp
+    full="$line   $comment $TAG"
+    [ -f "$file" ] && grep -qxF "$full" "$file" && return 0
+    if [ -f "$file" ] && grep -F "$TAG" "$file" | grep -qF "$needle"; then
+        tmp="$(mktemp)"
+        awk -v tag="$TAG" -v needle="$needle" '!(index($0, tag) && index($0, needle))' "$file" > "$tmp"
+        cat "$tmp" > "$file"
+        rm -f "$tmp"
+    fi
+    if [ -s "$file" ] && [ -n "$(tail -n 1 "$file")" ] && ! tail -n 1 "$file" | grep -qF "$TAG"; then
+        printf '\n' >> "$file"
+    fi
+    printf '%s\n' "$full" >> "$file"
     grep -qxF "line:$file" "$OWNED" 2>/dev/null || echo "line:$file" >> "$OWNED"
 }
 
@@ -234,12 +252,12 @@ if [ "$INSTALL_TMUX_CONF" = true ]; then
     own_file "$AGENT_CONF"
     cp "$TARGET_DIR/config/agent-indicator.conf" "$AGENT_CONF"
     if [ ! -f "$TMUX_CONF" ] || ! grep -qF "$SOURCE_LINE" "$TMUX_CONF"; then
-        add_tagged_line "$TMUX_CONF" "$SOURCE_LINE" "#"
+        put_tagged_line "$TMUX_CONF" "agent-indicator.conf" "$SOURCE_LINE" "#"
     fi
     echo "tmux config -> $AGENT_CONF (sourced from $TMUX_CONF)"
 fi
 
-if [ "$INSTALL_ALIAS" = true ] && command -v codex >/dev/null 2>&1; then
+if [ "$INSTALL_ALIAS" = true ]; then
     # Every existing startup file gets the line, and so does the current shell's own file even when it
     # does not exist yet. Zsh: ${ZDOTDIR}/.zshrc. Bash on macOS opens login shells, which read the first
     # of .bash_profile, .bash_login, .profile that exists (only .bash_profile is created when none does);
@@ -265,8 +283,17 @@ if [ "$INSTALL_ALIAS" = true ] && command -v codex >/dev/null 2>&1; then
     for f in "${startup_files[@]}"; do
         case "$seen_files" in *" $f "*) continue ;; esac
         seen_files="$seen_files$f "
+        if ! { [ -f "$f" ] && grep -qE "^[[:space:]]*alias ssh-reconnect=" "$f"; }; then
+            put_tagged_line "$f" "alias ssh-reconnect=" "$RECONNECT_ALIAS" "#"
+            echo "ssh-reconnect alias -> $f"
+        fi
+        case "$f" in
+            *zshrc) put_tagged_line "$f" "compdef" "$RECONNECT_COMPLETION_ZSH" "#" ;;
+            *) put_tagged_line "$f" "ssh-reconnect-completion.sh" "$RECONNECT_COMPLETION_BASH" "#" ;;
+        esac
+        command -v codex >/dev/null 2>&1 || continue
         [ -f "$f" ] && grep -qE "^[[:space:]]*alias codex=" "$f" && continue
-        add_tagged_line "$f" "$ALIAS_LINE" "#"
+        put_tagged_line "$f" "alias codex=" "$ALIAS_LINE" "#"
         echo "codex alias -> $f"
     done
 fi
@@ -278,7 +305,7 @@ if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ]; then
         cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
         touch "$HS_DIR/init.lua"
         if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
-            add_tagged_line "$HS_DIR/init.lua" "$HS_REQUIRE" "--"
+            put_tagged_line "$HS_DIR/init.lua" "agent_dots" "$HS_REQUIRE" "--"
         fi
         echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
     else
@@ -592,6 +619,7 @@ if [ "$UNINSTALL_ALL" = false ]; then
         fi
     fi
     echo "Codex: start new sessions from a new shell (alias) and run /hooks once to trust the hooks."
+    command -v autossh >/dev/null 2>&1 || echo "ssh-reconnect needs autossh: brew install autossh (or your package manager)"
 fi
 
 if [ "$UNINSTALL_CLAUDE" = true ]; then

@@ -5,7 +5,7 @@ and Codex sessions running in your panes: running, needs input, done, idle.
 
 ## Requirements
 
-- tmux 3.1+, bash 4+, Python 3
+- tmux 3.1+, bash 4+, Python 3, autossh (`brew install autossh`) for `ssh-reconnect`
 - Claude Code and/or Codex on the machine
 - macOS extras: Hammerspoon (`brew install --cask hammerspoon`) for the menu-bar item
 
@@ -20,7 +20,7 @@ Or from a checkout: `./install.sh`. The installer
 - copies the plugin to `~/.tmux/plugins/tmux-agent-indicator`
 - writes `~/.tmux/agent-indicator.conf` and adds one `source-file` line to `~/.tmux.conf`; your settings go in `~/.tmux/agent-indicator.local.conf`
 - adds the Claude hooks to `~/.claude/settings.json` and the Codex hooks to `~/.codex/hooks.json`
-- adds `alias codex='codex --no-daemon'` to the shell startup files that exist (`~/.bash_profile`, `~/.bashrc`, `~/.zshrc`)
+- adds `alias codex='codex --no-daemon'` and `alias ssh-reconnect=…` to the shell startup files
 - on macOS with Hammerspoon installed: copies `agent_dots.lua` to `~/.hammerspoon` and adds `require("agent_dots")` to `init.lua`
 - reloads the running tmux server
 
@@ -50,6 +50,11 @@ Windows whose pane runs `ssh` are listed at the right end of the status bar.
 
 Run the same installer on the host (or inside the dev container when the terminal runs there). The
 installer skips the Hammerspoon step there. If agent icons show as `_`, start tmux as `tmux -u`.
+
+Open the host with `ssh-reconnect HOST` instead of `ssh HOST`: the connection comes back by itself
+after the laptop sleeps or the network drops, and the window keeps its place in the status bar
+meanwhile. Put `RequestTTY force` and `RemoteCommand tmux new-session -A -s main` in the host's
+`~/.ssh/config` block to land in the same remote tmux session every time.
 
 - Through an `ssh HOST` window of a local tmux: the local window entry takes the colour of the most
   urgent agent on that host, and the menu bar gains an `SSH - HOST` segment with the Mac sounds.
