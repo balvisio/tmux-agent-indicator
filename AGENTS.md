@@ -15,8 +15,8 @@ Keep runtime logic in `scripts/`; keep `agent-indicator.tmux` focused on bootstr
 ## Build, Test, and Development Commands
 No build step is required.
 
-- `bash -n agent-indicator.tmux scripts/*.sh install.sh setup.sh`: syntax check.
-- `shellcheck agent-indicator.tmux scripts/*.sh install.sh setup.sh`: lint (if installed).
+- `bash -n agent-indicator.tmux scripts/*.sh install.sh`: syntax check.
+- `shellcheck agent-indicator.tmux scripts/*.sh install.sh`: lint (if installed).
 - `tmux source-file ~/.tmux.conf`: reload tmux config.
 - `./install.sh --target-dir ~/.tmux/plugins/tmux-agent-indicator`: local install/update.
 

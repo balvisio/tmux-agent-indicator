@@ -7,14 +7,14 @@
 --
 -- Local segment: this Mac's tmux. Then one segment per remote host, from two sources:
 --   VS   hosts VS Code is connected to through Remote-SSH (its own `ssh … <host>` processes)
---   SSH  hosts of the `ssh …` windows in the local tmux (@ssh_host, kept by ~/.tmux/agent-present.sh)
+--   SSH  hosts of the `ssh …` windows in the local tmux (@ssh_host, kept by the plugin's agent-present.sh sweep)
 -- Each host is polled once every REMOTE_REFRESH seconds over our own ssh connection by a probe script
 -- that looks at the host's tmux and at the tmux inside every running VS Code dev container. One
 -- segment per place under VS: "VS - host" for the host's own tmux, "VS - host - container" for a dev
 -- container. SSH shows only the host's own tmux: "SSH - host : ○" when it has no agent windows,
 -- regardless of agents in containers. A host under both sources is still polled once. A visible
 -- remote window that flips to needs-input / done plays the same Mac sound as a local one
--- (~/.tmux/agent-sound.sh).
+-- (the plugin's agent-sound.sh).
 --
 -- Click for a menu: the mode switch (On / Do Not Disturb) on top, then the agent windows per place;
 -- picking one selects it in its tmux and focuses iTerm (local; SSH also selects the ssh window) or
@@ -24,7 +24,7 @@
 --
 -- Modes:
 --   On              dots as above, sounds as usual.
---   Do Not Disturb  ⛔ instead of the dots, and no sounds: ~/.tmux/agent-sound.sh reads the same
+--   Do Not Disturb  ⛔ instead of the dots, and no sounds: the plugin's agent-sound.sh reads the same
 --                   mode file and stays silent. tmux colours are unaffected. Every remote poll
 --                   carries the mode, so the remote agent-sound.sh goes quiet too.
 -- The mode and the time it was last switched live in MODE_FILE as "on <epoch>" / "dnd <epoch>", so
@@ -33,14 +33,18 @@
 -- from a shell works too. The item is always in the menu bar.
 --
 -- Local state is read from tmux: @agent_present / @agent_label (maintained by
--- ~/.tmux/agent-present.sh) and the plugin's per-window @agent-indicator-state. The plugin
+-- the plugin's agent-present.sh sweep) and the plugin's per-window @agent-indicator-state. The plugin
 -- calculates needs-input > running > done > idle. State drives labels and notifications; title
 -- styles drive dot colors. Local and remote polling also detect palette changes without state changes.
 -- ~/.cache/agent_dots.state holds the last thing drawn or the last error (debugging without the console).
 
 -- Hammerspoon runs without LANG, and in the C locale tmux replaces tabs and emoji in command output
 -- with "_"; force UTF-8 so the tab-separated formats below survive.
-local TMUX = "LC_ALL=en_US.UTF-8 /opt/homebrew/bin/tmux -u"
+local TMUX_BIN = "/opt/homebrew/bin/tmux" -- Apple Silicon Homebrew; Intel Homebrew and MacPorts below
+for _, candidate in ipairs({ "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux" }) do
+    if io.open(candidate, "r") then TMUX_BIN = candidate; break end
+end
+local TMUX = "LC_ALL=en_US.UTF-8 " .. TMUX_BIN .. " -u"
 local ITERM = "com.googlecode.iterm2"
 local VSCODE = "com.microsoft.VSCode"
 local REFRESH = 2 -- seconds, local tmux + clock
@@ -50,8 +54,9 @@ local MAX_TITLE_WIDTH = 600 -- points, also limited to 30% of the narrowest conn
 local HOME = os.getenv("HOME")
 local STATE_FILE = HOME .. "/.cache/agent_dots.state"
 local MODE_DIR = HOME .. "/.local/state/agent-dots"
-local MODE_FILE = MODE_DIR .. "/mode" -- same path is hard-coded in ~/.tmux/agent-sound.sh
-local SOUND_SCRIPT = HOME .. "/.tmux/agent-sound.sh" -- plays Ping / Glass, honours MODE_FILE
+local MODE_FILE = MODE_DIR .. "/mode" -- same path is hard-coded in scripts/agent-sound.sh
+local PLUGIN_DIR = HOME .. "/.tmux/plugins/tmux-agent-indicator"
+local SOUND_SCRIPT = PLUGIN_DIR .. "/scripts/agent-sound.sh" -- plays Ping / Glass, honours MODE_FILE
 local SSH = "/usr/bin/ssh"
 -- No prompts ever (BatchMode); our own multiplexed connection per host, kept 60 s past the last poll;
 -- RemoteCommand/RequestTTY override what ~/.ssh/config may set for interactive logins.

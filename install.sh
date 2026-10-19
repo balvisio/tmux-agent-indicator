@@ -24,7 +24,7 @@ if [ -n "$SCRIPT_SOURCE" ] && [ -f "$SCRIPT_SOURCE" ]; then
 fi
 
 if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/agent-indicator.tmux" ]; then
-    INSTALL_REPO="${TMUX_AGENT_INSTALL_REPO:-accessd/tmux-agent-indicator}"
+    INSTALL_REPO="${TMUX_AGENT_INSTALL_REPO:-balvisio/tmux-agent-indicator}"
     INSTALL_REF="${TMUX_AGENT_INSTALL_REF:-main}"
     ARCHIVE_URL="https://codeload.github.com/${INSTALL_REPO}/tar.gz/refs/heads/${INSTALL_REF}"
 
@@ -51,6 +51,10 @@ TARGET_DIR="${TMUX_AGENT_INSTALL_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}"
 INSTALL_CLAUDE=true
 INSTALL_CODEX=true
 INSTALL_OPENCODE=true
+INSTALL_TMUX_CONF=true
+INSTALL_ALIAS=true
+INSTALL_HAMMERSPOON=true
+UNINSTALL_ALL=false
 UNINSTALL_CLAUDE=false
 UNINSTALL_CODEX=false
 UNINSTALL_OPENCODE=false
@@ -64,6 +68,10 @@ Options:
   --no-claude          Skip Claude hooks setup
   --no-codex           Skip Codex hooks setup
   --no-opencode        Skip OpenCode plugin setup
+  --no-tmux-conf       Do not install ~/.tmux/agent-indicator.conf or touch ~/.tmux.conf
+  --no-alias           Do not add the `codex --no-daemon` alias to the shell startup files
+  --no-hammerspoon     Do not install the macOS menu-bar module (~/.hammerspoon/agent_dots.lua)
+  --uninstall          Remove everything the installer put in place (plugin, config, hooks, alias, module)
   --uninstall-claude   Remove Claude hooks/status-line wrapper from ~/.claude/settings.json
   --uninstall-codex    Remove tmux-agent-indicator Codex hooks from ~/.codex/hooks.json
   --uninstall-opencode Remove tmux-agent-indicator OpenCode plugin from ~/.config/opencode/plugins/
@@ -88,6 +96,31 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-opencode)
             INSTALL_OPENCODE=false
+            shift
+            ;;
+        --no-tmux-conf)
+            INSTALL_TMUX_CONF=false
+            shift
+            ;;
+        --no-alias)
+            INSTALL_ALIAS=false
+            shift
+            ;;
+        --no-hammerspoon)
+            INSTALL_HAMMERSPOON=false
+            shift
+            ;;
+        --uninstall)
+            UNINSTALL_ALL=true
+            UNINSTALL_CLAUDE=true
+            UNINSTALL_CODEX=true
+            UNINSTALL_OPENCODE=true
+            INSTALL_CLAUDE=false
+            INSTALL_CODEX=false
+            INSTALL_OPENCODE=false
+            INSTALL_TMUX_CONF=false
+            INSTALL_ALIAS=false
+            INSTALL_HAMMERSPOON=false
             shift
             ;;
         --uninstall-claude)
@@ -142,19 +175,86 @@ if [ "$INSTALL_OPENCODE" = true ] && [ "$UNINSTALL_OPENCODE" = false ]; then
     fi
 fi
 
-mkdir -p "$TARGET_DIR/scripts" "$TARGET_DIR/hooks" "$TARGET_DIR/plugins" "$TARGET_DIR/licenses"
+TMUX_CONF="$HOME/.tmux.conf"
+AGENT_CONF="$HOME/.tmux/agent-indicator.conf"
+SOURCE_LINE="source-file ~/.tmux/agent-indicator.conf"
+MARKER="# tmux-agent-indicator"
+ALIAS_LINE="alias codex='codex --no-daemon'"
+HS_DIR="$HOME/.hammerspoon"
+HS_MODULE="$HS_DIR/agent_dots.lua"
+HS_REQUIRE='require("agent_dots")'
 
-cp "$SCRIPT_DIR/agent-indicator.tmux" "$TARGET_DIR/"
-cp "$SCRIPT_DIR/README.md" "$TARGET_DIR/"
-cp "$SCRIPT_DIR/LICENSE" "$TARGET_DIR/"
-cp "$SCRIPT_DIR/licenses/"*.txt "$TARGET_DIR/licenses/"
-cp "$SCRIPT_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"
-cp "$SCRIPT_DIR/scripts/"*.py "$TARGET_DIR/scripts/"
-cp "$SCRIPT_DIR/hooks/"*.json "$TARGET_DIR/hooks/"
-cp "$SCRIPT_DIR/plugins/"*.js "$TARGET_DIR/plugins/"
-cp "$SCRIPT_DIR/setup.sh" "$TARGET_DIR/"
+# Remove the marker-tagged lines the installer added to a shared file (startup files, init.lua, .tmux.conf).
+remove_marked_lines() {
+    local file="$1" tmp
+    [ -f "$file" ] || return 0
+    grep -qF "$MARKER" "$file" || return 0
+    tmp="$(mktemp)"
+    grep -vF "$MARKER" "$file" > "$tmp" || true
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+}
 
-chmod +x "$TARGET_DIR/agent-indicator.tmux" "$TARGET_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"*.py "$TARGET_DIR/setup.sh"
+if [ "$UNINSTALL_ALL" = true ]; then
+    remove_marked_lines "$TMUX_CONF"
+    rm -f "$AGENT_CONF"
+    for f in "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do remove_marked_lines "$f"; done
+    remove_marked_lines "$HS_DIR/init.lua"
+    rm -f "$HS_MODULE"
+    echo "Removed ~/.tmux/agent-indicator.conf, the source-file line, the codex alias and the Hammerspoon module"
+fi
+
+# A symlink here points at a development checkout: replace the link, never write through it.
+if [ -L "$TARGET_DIR" ]; then
+    rm "$TARGET_DIR"
+fi
+if [ "$UNINSTALL_ALL" = false ]; then
+    mkdir -p "$TARGET_DIR/scripts" "$TARGET_DIR/hooks" "$TARGET_DIR/plugins" "$TARGET_DIR/licenses" "$TARGET_DIR/config" "$TARGET_DIR/integrations/hammerspoon"
+fi
+
+if [ "$UNINSTALL_ALL" = false ]; then
+    cp "$SCRIPT_DIR/agent-indicator.tmux" "$TARGET_DIR/"
+    cp "$SCRIPT_DIR/README.md" "$TARGET_DIR/"
+    cp "$SCRIPT_DIR/LICENSE" "$TARGET_DIR/"
+    cp "$SCRIPT_DIR/licenses/"*.txt "$TARGET_DIR/licenses/"
+    cp "$SCRIPT_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"
+    cp "$SCRIPT_DIR/scripts/"*.py "$TARGET_DIR/scripts/"
+    cp "$SCRIPT_DIR/hooks/"*.json "$TARGET_DIR/hooks/"
+    cp "$SCRIPT_DIR/plugins/"*.js "$TARGET_DIR/plugins/"
+    cp "$SCRIPT_DIR/config/agent-indicator.conf" "$TARGET_DIR/config/"
+    cp "$SCRIPT_DIR/integrations/hammerspoon/agent_dots.lua" "$TARGET_DIR/integrations/hammerspoon/"
+
+    chmod +x "$TARGET_DIR/agent-indicator.tmux" "$TARGET_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"*.py
+fi
+
+if [ "$INSTALL_TMUX_CONF" = true ]; then
+    mkdir -p "$HOME/.tmux"
+    cp "$TARGET_DIR/config/agent-indicator.conf" "$AGENT_CONF"
+    if [ ! -f "$TMUX_CONF" ] || ! grep -qF "$SOURCE_LINE" "$TMUX_CONF"; then
+        printf '\n%s   %s\n' "$SOURCE_LINE" "$MARKER" >> "$TMUX_CONF"
+    fi
+    echo "tmux config -> $AGENT_CONF (sourced from $TMUX_CONF)"
+fi
+
+if [ "$INSTALL_ALIAS" = true ] && command -v codex >/dev/null 2>&1; then
+    # Bash login shells (macOS terminals) read .bash_profile, other Bash shells .bashrc, Zsh .zshrc.
+    # Only files that already exist are touched, and a user's own codex alias is left alone.
+    for f in "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$f" ] || continue
+        grep -qE "^[[:space:]]*alias codex=" "$f" && continue
+        printf '\n%s   %s\n' "$ALIAS_LINE" "$MARKER" >> "$f"
+        echo "codex alias -> $f"
+    done
+fi
+
+if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ] && [ -d "$HS_DIR" ]; then
+    cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
+    touch "$HS_DIR/init.lua"
+    if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
+        printf '\n%s   -- %s\n' "$HS_REQUIRE" "${MARKER#\# }" >> "$HS_DIR/init.lua"
+    fi
+    echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
+fi
 
 if [ "$INSTALL_CLAUDE" = true ] || [ "$UNINSTALL_CLAUDE" = true ]; then
     CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -449,25 +549,18 @@ if [ "$UNINSTALL_OPENCODE" = true ]; then
     rm -f "$OPENCODE_PLUGINS_DIR/$OPENCODE_PLUGIN_NAME"
 fi
 
-cat <<EOF
-Installed/updated tmux-agent-indicator in:
-  $TARGET_DIR
-
-Add to ~/.tmux.conf (TPM):
-  set -g @plugin 'accessd/tmux-agent-indicator'
-
-Or direct load:
-  run-shell '$TARGET_DIR/agent-indicator.tmux'
-
-Status example:
-  set -g status-right '#{agent_limits} #{agent_indicator} | %H:%M'
-
-If using minimal-tmux-status:
-  set -g @minimal-tmux-status-right '#{agent_limits} #{agent_indicator} #(gitmux "#{pane_current_path}")'
-
-Reload tmux:
-  tmux source-file ~/.tmux.conf
-EOF
+if [ "$UNINSTALL_ALL" = false ]; then
+    echo "Installed/updated tmux-agent-indicator in $TARGET_DIR"
+    if [ "$INSTALL_TMUX_CONF" = true ] && tmux info >/dev/null 2>&1; then
+        # Reload only the plugin config: sourcing a whole ~/.tmux.conf can re-run new-session lines.
+        if tmux source-file "$AGENT_CONF" 2>/dev/null; then
+            echo "Running tmux server reloaded ($AGENT_CONF)"
+        else
+            echo "Reload the running tmux server with: tmux source-file $AGENT_CONF"
+        fi
+    fi
+    echo "Codex: start new sessions from a new shell (alias) and run /hooks once to trust the hooks."
+fi
 
 if [ "$UNINSTALL_CLAUDE" = true ]; then
     echo "Removed tmux-agent-indicator Claude hooks/status-line wrapper from: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
@@ -481,15 +574,9 @@ if [ "$UNINSTALL_OPENCODE" = true ]; then
     echo "Removed tmux-agent-indicator OpenCode plugin from: ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/"
 fi
 
-if [[ -t 0 ]]; then
-    printf "\nConfigure colors now? [Y/n]: "
-    read -r setup_reply
-    case "${setup_reply:-Y}" in
-        [nN]*) ;;
-        *) bash "$TARGET_DIR/setup.sh" ;;
-    esac
-else
-    echo ""
-    echo "To configure colors interactively:"
-    echo "  bash $TARGET_DIR/setup.sh"
+# Last: the hook uninstallers above still need the templates inside the plugin directory.
+if [ "$UNINSTALL_ALL" = true ]; then
+    rm -rf "$TARGET_DIR"
+    echo "Removed $TARGET_DIR"
 fi
+

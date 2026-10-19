@@ -27,10 +27,10 @@ jobs:
           sudo apt-get install --yes shellcheck
 
       - name: Check Bash syntax
-        run: bash -n agent-indicator.tmux scripts/*.sh install.sh setup.sh tests/*.sh tests/lib/*.sh
+        run: bash -n agent-indicator.tmux scripts/*.sh install.sh tests/*.sh tests/lib/*.sh
 
       - name: Run ShellCheck
-        run: shellcheck -x -S warning agent-indicator.tmux scripts/*.sh install.sh setup.sh tests/*.sh tests/lib/*.sh
+        run: shellcheck -x -S warning agent-indicator.tmux scripts/*.sh install.sh tests/*.sh tests/lib/*.sh
 
       - name: Check Python syntax
         run: python3 -m py_compile scripts/*.py tests/*.py

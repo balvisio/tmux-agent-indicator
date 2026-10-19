@@ -1,20 +1,95 @@
 # tmux-agent-indicator
 
-[![CI](https://github.com/accessd/tmux-agent-indicator/actions/workflows/ci.yml/badge.svg)](https://github.com/accessd/tmux-agent-indicator/actions/workflows/ci.yml)
+[![CI](https://github.com/balvisio/tmux-agent-indicator/actions/workflows/ci.yml/badge.svg)](https://github.com/balvisio/tmux-agent-indicator/actions/workflows/ci.yml)
 
-AI agents run in tmux panes but give no signal when they finish or need input. You have to keep switching panes to check. This plugin tracks agent state and surfaces it through pane borders, window titles, and status bar icons so you never miss a transition.
+tmux window titles, pane borders and a macOS menu-bar item that follow the state of the Claude Code
+and Codex sessions running in your panes: running, needs input, done, idle.
 
-## Demo
+## Requirements
 
-https://github.com/user-attachments/assets/b6b6b466-4b42-4d45-85aa-b9b659e4bafe
+- tmux 3.1+, bash 4+, Python 3
+- Claude Code and/or Codex on the machine
+- macOS extras: Hammerspoon (`brew install --cask hammerspoon`) for the menu-bar item
 
-When the agent finishes, the window title background/foreground changes and the pane border updates to signal completion.
+## Install
 
-| ![needs-input](docs/images/needs-input.png) | ![done](docs/images/done.png) | ![done-pane-bg](docs/images/done-pane-bg.png) |
-|:---:|:---:|:---:|
-| needs-input: yellow window title | done: red window title | done: pane background change |
+```bash
+curl -fsSL https://raw.githubusercontent.com/balvisio/tmux-agent-indicator/main/install.sh | bash
+```
 
-## How it works
+Or from a checkout: `./install.sh`. The installer
+
+- copies the plugin to `~/.tmux/plugins/tmux-agent-indicator`
+- writes `~/.tmux/agent-indicator.conf` and adds one `source-file` line to `~/.tmux.conf`
+- adds the Claude hooks to `~/.claude/settings.json` and the Codex hooks to `~/.codex/hooks.json`
+- adds `alias codex='codex --no-daemon'` to the shell startup files that exist (`~/.bash_profile`, `~/.bashrc`, `~/.zshrc`)
+- on macOS with Hammerspoon: copies `agent_dots.lua` to `~/.hammerspoon` and adds `require("agent_dots")` to `init.lua`
+- reloads the running tmux server
+
+Options: `--no-tmux-conf`, `--no-alias`, `--no-hammerspoon`, `--no-claude`, `--no-codex`, `--no-opencode`, `--uninstall`.
+
+## Finish
+
+1. Open a new shell (picks up the alias).
+2. Codex: run `/hooks` once and trust the tmux-agent-indicator hooks. Repeat after an update that changes a hook.
+3. Hammerspoon: grant Accessibility on first launch, enable *Launch at login*, then menu-bar icon → **Reload Config**.
+
+## Verify
+
+```bash
+S=~/.tmux/plugins/tmux-agent-indicator/scripts/agent-state.sh
+bash "$S" --agent demo --state needs-input   # current window title magenta, Ping
+bash "$S" --agent demo --state done          # red, Glass
+bash "$S" --agent demo --state off           # cleared
+```
+
+Start `claude` or `codex` in a window and switch to another one: the title is blue while idle, yellow
+while it works, magenta when it waits for you, red when it finished, cleared when you come back.
+Windows whose pane runs `ssh` are listed at the right end of the status bar.
+
+## Remote Linux host
+
+Run the same installer on the host (or inside the dev container when the terminal runs there). The
+installer skips the Hammerspoon step there. If agent icons show as `_`, start tmux as `tmux -u`.
+
+- Through an `ssh HOST` window of a local tmux: the local window entry takes the colour of the most
+  urgent agent on that host, and the menu bar gains an `SSH - HOST` segment with the Mac sounds.
+  `HOST` must be an alias in `~/.ssh/config` that connects without a prompt.
+- Through the VS Code Remote-SSH terminal: the menu bar gains a `VS - HOST` segment while VS Code is
+  connected. Without Hammerspoon, the remote can only ring the terminal bell; VS Code plays it only with
+  `"accessibility.signals.terminalBell": { "sound": "on" }` in the user settings.
+
+## Update
+
+Run the install command again. Then `/hooks` in Codex if a hook changed, and reload Hammerspoon.
+
+## Uninstall
+
+```bash
+~/.tmux/plugins/tmux-agent-indicator/install.sh --uninstall
+```
+
+Removes the plugin, `~/.tmux/agent-indicator.conf`, the `source-file` line, the hooks, the alias and
+the Hammerspoon module. Your own `~/.tmux.conf`, startup files and `init.lua` keep everything else.
+
+## Customize
+
+`~/.tmux/agent-indicator.conf` is overwritten on update. Put overrides in `~/.tmux.conf` after the
+`source-file` line; a later `set` wins. Colours per state:
+
+```tmux
+set -g @agent-indicator-running-window-title-bg 'yellow'
+set -g @agent-indicator-needs-input-window-title-bg 'magenta'
+set -g @agent-indicator-done-window-title-bg 'red'
+```
+
+Sounds off: `set -g @agent-indicator-notification-enabled 'off'`. Do Not Disturb (no sounds, colours
+unchanged): click the menu-bar item, or `echo "dnd $(date +%s)" > ~/.local/state/agent-dots/mode`.
+The full option list is in the reference below.
+
+## Reference
+
+### How it works
 
 The plugin tracks three states per pane: `running`, `needs-input`, and `done`.
 
@@ -72,7 +147,7 @@ before detaching, and queued events are discarded if that pane was replaced or t
 Full sweeps lock one window update at a time so hooks can run between updates. The empty lock file
 next to the tmux socket is intentional and must not be deleted while that server has active writers.
 
-### Optional presence labels
+#### Presence labels
 
 `scripts/agent-present.sh sweep` maintains blue idle styling, `@agent_present`, `@agent_label`, and
 `@ssh_host` for integrations such as the Hammerspoon dots. It uses `scripts/pane-processes.sh` to
@@ -80,89 +155,8 @@ require both a matching terminal and ancestry from the pane process. This preven
 processes with the same `pts/N` names from labeling unrelated host shells as agents or SSH sessions.
 The plugin indicator uses the same ancestry filter for its process-detection fallback.
 
-For an existing `~/.tmux/agent-present.sh` entrypoint, replace its implementation with this dispatcher
-so the status configuration can continue calling the same path:
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-plugin_dir="${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}"
-exec "$plugin_dir/scripts/agent-present.sh" "$@"
-```
-
-## Features
-
-- Per-agent status icons in the status bar
-- Knight Rider animation during `running` state
-- Deferred pane reset: keep pane colors until focus, not when the hook fires
-- Process detection fallback for agents that don't fire hooks
-- Tmux display-message notifications on state transitions
-
-## Requirements
-
-tmux 3.1+, bash 4+, Python 3
-
-## Installation
-
-### One-command installer (recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/accessd/tmux-agent-indicator/main/install.sh | bash
-```
-
-The installer will offer to run the interactive color setup wizard. You can also run it later:
-
-```bash
-bash ~/.tmux/plugins/tmux-agent-indicator/setup.sh
-```
-
-This installs files to `~/.tmux/plugins/tmux-agent-indicator` and updates:
-- `~/.claude/settings.json` hooks for Claude (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, `SessionEnd`)
-- `~/.codex/hooks.json` hooks for Codex (`UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt`, `SessionEnd`)
-- `~/.config/opencode/plugins/` plugin for OpenCode
-
-After installing Codex hooks, run `/hooks` in Codex and trust the tmux-agent-indicator hook definitions before they can run.
-
-**Codex must run with `codex --no-daemon` for state indicators to work.** The shared daemon's hooks
-cannot identify their originating tmux pane.
-
-Integration uninstall options:
-
-```bash
-./install.sh --uninstall-claude
-./install.sh --uninstall-codex
-./install.sh --uninstall-opencode
-```
-
-### TPM
-
-Add to ~/.tmux.conf:
-
-```tmux
-set -g @plugin 'accessd/tmux-agent-indicator'
-```
-
-Reload tmux:
-
-```bash
-tmux source-file ~/.tmux.conf
-```
-
-## Status Bar Integration
-
-For native status:
-
-```tmux
-set -g status-right '#{agent_limits} #{agent_indicator} | %H:%M'
-```
-
-For [minimal-tmux-status](https://github.com/niksingh710/minimal-tmux-status):
-
-```tmux
-set -g @minimal-tmux-status-right '#{agent_limits} #{agent_indicator} #(gitmux "#{pane_current_path}")'
-```
-
-## Agent limits
+### Agent limits
 
 `#{agent_limits}` shows the shortest active account-limit window for Claude and Codex:
 
@@ -189,7 +183,7 @@ set -g @agent-indicator-limits-cache-seconds '60'
 
 Omit a provider to hide it. Set the cache duration to `0` to read the source files on every status refresh.
 
-## Session Dots
+### Session Dots
 
 Optional visual session indicator in the status bar. Shows all sessions as symbols with the current one highlighted. Sessions where agents need attention (`needs-input` or `done` state) are highlighted in a different color.
 
@@ -233,7 +227,7 @@ set -g @agent-indicator-session-dots-attention-states 'needs-input,done'
 
 The current session always shows as the active dot, even if it also has agents needing attention.
 
-## Configuration
+### Configuration
 
 Quick start with the most useful options:
 
@@ -401,7 +395,7 @@ Tmux supports:
 
 </details>
 
-## Notifications
+### Notifications
 
 State transitions trigger a `tmux display-message` notification. Enabled by default for `needs-input` and `done` states.
 
@@ -437,7 +431,7 @@ set -g @agent-indicator-notification-command 'osascript -e "display notification
 set -g @agent-indicator-notification-command 'afplay /System/Library/Sounds/Ping.aiff'
 ```
 
-## Custom Agent Integration
+### Custom Agent Integration
 
 To integrate any agent that does not have built-in hook support, call `agent-state.sh` from your agent's hooks or wrapper script.
 
@@ -475,7 +469,7 @@ to `running` once a permission prompt or question has been answered, without tou
 ~/.tmux/plugins/tmux-agent-indicator/scripts/agent-state.sh --agent claude --state running --if-state needs-input
 ```
 
-## Hook Templates
+### Hook Templates
 
 Default template files:
 - `hooks/claude-hooks.json`
@@ -506,7 +500,7 @@ after its key-forwarding command. This fallback covers Ctrl+C sent through tmux,
 through Escape, another client, or an external signal. Codex uses its native
 [Interrupt hook](https://learn.chatgpt.com/docs/hooks#interrupt).
 
-## OpenCode Plugin
+### OpenCode Plugin
 
 The installer copies `plugins/opencode-tmux-agent-indicator.js` to `~/.config/opencode/plugins/`. The plugin uses OpenCode's event system:
 - `session.status` (busy) -> `running`
@@ -520,6 +514,6 @@ mkdir -p ~/.config/opencode/plugins
 cp plugins/opencode-tmux-agent-indicator.js ~/.config/opencode/plugins/
 ```
 
-## License
+### License
 
 MIT

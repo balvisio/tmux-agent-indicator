@@ -58,15 +58,14 @@ Only custom display options are written; local agent states and saved window sty
 
 ## Existing companion configuration
 
-The script expects these window options from `scripts/agent-present.sh sweep` (often dispatched
-through `~/.tmux/agent-present.sh`):
+The script expects these window options from `scripts/agent-present.sh sweep` (wired up by the shipped `config/agent-indicator.conf`):
 
 - `@agent_present=1` for windows containing an agent.
 - `@agent_label` for their display labels.
 - `@ssh_host` on local SSH windows for remote-host discovery.
 
-For remote notifications and Do Not Disturb, it uses `~/.tmux/agent-sound.sh` and
-`~/.local/state/agent-dots/mode`. The sound script is separate from this repository.
+For remote notifications and Do Not Disturb, it uses the plugin's `scripts/agent-sound.sh` and
+`~/.local/state/agent-dots/mode`. The installer puts both in place.
 The tmux binary path near the top of the module defaults to `/opt/homebrew/bin/tmux`; adjust it for
 other Homebrew installations. Remote hosts need tmux and the same presence options. Container
 inspection additionally uses Docker on the remote host.
