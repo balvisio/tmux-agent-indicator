@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 
 
@@ -82,6 +83,44 @@ def main():
                 if line.startswith("PASS:"):
                     print(line)
             print("PASS: remote probe transmits the same effective style as the local query")
+
+            # A local proxy keeps ssh open without connecting to any network host.
+            ssh_window = tmux("new-window", "-P", "-F", "#{window_id}",
+                              "exec /usr/bin/ssh -F /dev/null -o 'ProxyCommand=sleep 60' fixture.invalid")
+            for _ in range(30):
+                if tmux("display", "-p", "-t", ssh_window, "#{pane_current_command}") == "ssh":
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("SSH fixture did not start")
+            helper = next(line for line in (ROOT / "integrations/hammerspoon/README.md").read_text().splitlines()
+                          if line.startswith("set -g @ssh_agent_title_style "))
+            tmux(*shlex.split(helper))
+            for option in ("window-status-format", "window-status-current-format"):
+                tmux("set", "-g", option, "#{E:@ssh_agent_title_style}#I:#W#F")
+            tmux("set", "-w", "-t", ssh_window, "@ssh_host", "colossus")
+            publish = shlex.split((fixture / "ssh-color-command.txt").read_text())
+            publish = publish[publish.index("set-option"):]
+            publish = [ssh_window if value == "@6" else value for value in publish]
+            tmux(*publish)
+            assert tmux("show", "-wqv", "-t", ssh_window, "@ssh_agent_color") == "magenta"
+
+            def title(option="window-status-format"):
+                return tmux("display", "-p", "-t", ssh_window, "#{E:" + option + "}")
+
+            for option in ("window-status-format", "window-status-current-format"):
+                assert title(option).startswith("#[bg=magenta,fg=black,noreverse]"), title(option)
+            tmux("set", "-w", "-t", ssh_window, "@agent_label", "local-agent")
+            assert not title().startswith("#["), "SSH color must not override local agent titles"
+            tmux("set", "-wu", "-t", ssh_window, "@agent_label")
+            tmux("set", "-w", "-t", ssh_window, "@ssh_host", "other-host")
+            assert not title().startswith("#["), "host change must immediately invalidate cached color"
+            tmux("set", "-w", "-t", ssh_window, "@ssh_host", "colossus")
+            tmux("set", "-w", "-t", ssh_window, "@ssh_agent_color", "green")
+            assert title().startswith("#[bg=green,fg=black,noreverse]"), title()
+            tmux("set", "-w", "-t", ssh_window, "@ssh_agent_color", "")
+            assert not title().startswith("#["), "failed polls must restore the normal title"
+            print("PASS: published SSH colors render in tmux and respect host/local-agent guards")
         finally:
             subprocess.run([tmux_bin, "-L", socket, "kill-server"], env=environment, capture_output=True)
 

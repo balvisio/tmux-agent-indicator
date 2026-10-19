@@ -11,6 +11,9 @@ local sounds = 0
 local shown = ''
 local screenWidths = {5000}
 local sshOutput = '@6\t5\tcolossus\n'
+local sshOptions = {}
+local sshWrites = 0
+local sshCommand
 local mousePoint = {x = 0, y = 0}
 local popupCount = 0
 local popupItems = nil
@@ -29,10 +32,26 @@ end
 styled.__index = {find = function(self, ...) return self.text:find(...) end}
 hs = {
     execute = function(command)
-        if command:find('/bin/ps',1,true) then
+        if command:find('set-option -wq',1,true) then
+            sshWrites = sshWrites + 1
+            sshCommand = command
+            assert(not command:find('window-status',1,true), 'remote colors must not overwrite local agent styles')
+            for id, option, value in command:gmatch("set%-option %-wq %-t (@%d+) (@ssh_agent_%w+) '([^']*)'") do
+                sshOptions[id] = sshOptions[id] or {}
+                sshOptions[id][option] = value
+            end
+            return '', true
+        elseif command:find('/bin/ps',1,true) then
             return vscode and '10 1 Code remote-ssh\n11 10 /usr/bin/ssh colossus\n' or '', true
         elseif command:find('@ssh_host',1,true) then
-            return sshOutput, true
+            local rows = {}
+            for row in sshOutput:gmatch('[^\n]+') do
+                local id = row:match('^([^\t]+)')
+                local options = sshOptions[id] or {}
+                rows[#rows + 1] = row .. '\t' .. (options['@ssh_agent_host'] or '')
+                    .. '\t' .. (options['@ssh_agent_color'] or '')
+            end
+            return table.concat(rows, '\n'), true
         elseif command:find('@agent-indicator-state',1,true) then
             localCommand = command
             return localOutput, true
@@ -275,6 +294,42 @@ assert(popupCount == beforePopups + 3, 'DND must open the mode menu even at the 
 dots.setMode('on')
 assert(shown:match('%d+:%d%d  >$'), 'DND must preserve the chosen compact layout')
 print('PASS: automatic sizing, local/remote summary priority, direct arrow clicks, clock, and menu access')
+
+sshOutput = '@6\t5\tcolossus\n@7\t6\tcolossus\n'
+dots.pollAll()
+assert(#dots.sshLinks() == 2 and #dots.segments() == 2, 'color every SSH window but keep one segment per host')
+local hostPoll = 'T\thost\tcolossus\nW\tcontainer:1000\tcontainer\t@0\t0\tagent\t0\tmain\tneeds-input\tbg=magenta\n'
+dots.applyPoll('colossus', 0, hostPoll, '')
+dots.refresh()
+assert(sshOptions['@6']['@ssh_agent_color'] == 'green', 'containers must not color the SSH host')
+for i, pair in ipairs({{'idle', 'blue'}, {'done', 'red'}, {'running', 'yellow'}, {'needs-input', '#123abc'}}) do
+    -- Lower-priority windows follow the winner to catch last-event-wins behavior.
+    hostPoll = hostPoll .. ('W\thost\tcolossus\t@%d\t%d\tagent\t0\tmain\t%s\tbg=%s\n'):format(i, i, pair[1], pair[2])
+    dots.applyPoll('colossus', 0, hostPoll .. 'W\thost\tcolossus\t@20\t20\tagent\t0\tmain\tidle\tbg=blue\n', '')
+    dots.refresh()
+    for _, id in ipairs({'@6', '@7'}) do
+        assert(sshOptions[id]['@ssh_agent_color'] == pair[2], 'wrong SSH summary color: ' .. pair[1])
+    end
+end
+local writesBefore = sshWrites
+dots.refresh()
+assert(sshWrites == writesBefore, 'unchanged polls must not write tmux options')
+dots.applyPoll('colossus', 255, '', 'unreachable')
+dots.refresh()
+assert(sshOptions['@6']['@ssh_agent_color'] == '', 'failed polls must clear stale SSH colors')
+poll('needs-input', 'running', 'bg=magenta', 'bg=yellow')
+sshOutput = '@6\t5\tother-host\n@7\t6\t\n'
+dots.refresh()
+assert(sshOptions['@6']['@ssh_agent_host'] == 'other-host' and sshOptions['@6']['@ssh_agent_color'] == '',
+    'reconnecting to another host must not retain its predecessor color')
+assert(sshOptions['@7']['@ssh_agent_host'] == '' and sshOptions['@7']['@ssh_agent_color'] == '',
+    'disconnect must clear published colors')
+sshOutput = '@6\t5\tcolossus\n'
+poll('needs-input', 'needs-input', 'bg=magenta', 'bg=magenta')
+local colorCommand = assert(io.open(arg[2] .. '/ssh-color-command.txt', 'w'))
+colorCommand:write(sshCommand)
+colorCommand:close()
+print('PASS: SSH titles share host priority, update duplicate windows, and clear disconnected/failed polls')
 
 -- The Python harness runs these exact queries against an isolated tmux server.
 local probe = assert(io.open(arg[2] .. '/probe.sh', 'w'))

@@ -64,6 +64,13 @@ local SSH_OPTS = {
 local MODES = { on = "On", dnd = "Do Not Disturb" }
 local STATES = { idle = true, running = true, ["needs-input"] = true, done = true }
 local STATE_PRIORITY = { idle = 1, done = 2, running = 3, ["needs-input"] = 4 }
+local function highestPriority(windows)
+    local top
+    for _, w in ipairs(windows) do
+        if not top or STATE_PRIORITY[w.state] > STATE_PRIORITY[top.state] then top = w end
+    end
+    return top
+end
 -- ANSI colors are theme-dependent. Use stable menu-bar equivalents for named
 -- colors; RGB and the extended 256-color palette have exact portable values.
 local ANSI = {
@@ -101,7 +108,8 @@ local function styleColor(style)
         elseif token == "noreverse" then reverse = false end
     end
     if reverse then bg, fg = fg, bg end
-    return colorHex(bg) or colorHex(fg) or "#9CA3AF"
+    local color = colorHex(bg) and bg or colorHex(fg) and fg or "#9CA3AF"
+    return colorHex(color), color
 end
 
 -- Apply the same base/current style layering as the window list. An unstyled
@@ -310,15 +318,15 @@ local function jumpTo(w)
     end
 end
 
--- Hosts of the local ssh windows (@ssh_host from the sweep): { host, window }, window order, one per host.
+-- SSH windows and their published colors, including disconnected windows needing cleanup.
 local function sshLinks()
-    local out = shell(TMUX .. " list-windows -a -F '#{window_id}\t#{window_index}\t#{@ssh_host}'") or ""
+    local out = shell(TMUX .. " list-windows -a -F '#{window_id}\t#{window_index}\t#{@ssh_host}\t#{@ssh_agent_host}\t#{@ssh_agent_color}'") or ""
     local links, seen = {}, {}
     for line in out:gmatch("[^\r\n]+") do
-        local id, _, host = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
-        if id and host and host ~= "" and not seen[host] then
-            seen[host] = true
-            links[#links + 1] = { host = host, window = id }
+        local id, _, host, colorHost, color = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+        if id and id:match("^@%d+$") and (host ~= "" or colorHost ~= "" or color ~= "") and not seen[id] then
+            seen[id] = true
+            links[#links + 1] = { host = host, window = id, colorHost = colorHost, color = color }
         end
     end
     return links
@@ -372,10 +380,28 @@ end
 
 local function windowsForSegment(seg)
     local windows = {}
-    for _, w in ipairs((remote[seg.host] or {}).windows or {}) do
+    local r = remote[seg.host]
+    for _, w in ipairs(r and r.ok and r.windows or {}) do
         if belongsToSegment(seg, w) then windows[#windows + 1] = w end
     end
     return windows
+end
+
+-- Publish only display options; local pane states and the plugin's style bookkeeping stay independent.
+local function syncSshColors()
+    local commands = {}
+    for _, link in ipairs(sshLinks()) do
+        local r = remote[link.host]
+        local top = highestPriority(windowsForSegment({ kind = "SSH", host = link.host }))
+        local color = r and r.ok and (top and top.tmuxColor or "green") or ""
+        if link.colorHost ~= link.host or link.color ~= color then
+            commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_host " .. shq(link.host)
+            commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_color " .. shq(color)
+        end
+    end
+    if #commands > 0 then
+        shell(TMUX .. " " .. table.concat(commands, " \\; "))
+    end
 end
 
 local function windowIsVisible(host, w)
@@ -402,8 +428,10 @@ local function applyPoll(host, code, out, err)
         if f[1] == "T" then
             targets = targets + 1
         elseif f[1] == "W" and #f >= 9 then
+            local color, tmuxColor = styleColor(f[10])
             local w = { spec = f[2], where = f[3], id = f[4], index = tonumber(f[5]) or 0, label = f[6],
-                        active = (f[7] == "1"), session = f[8], state = STATES[f[9]] and f[9] or "idle", color = styleColor(f[10]) }
+                        active = (f[7] == "1"), session = f[8], state = STATES[f[9]] and f[9] or "idle",
+                        color = color, tmuxColor = tmuxColor }
             windows[#windows + 1] = w
             local key = w.spec .. "/" .. w.id
             states[key] = w.state
@@ -450,7 +478,13 @@ end
 local function pollAll()
     local segs, hosts, seen, key = {}, {}, {}, {}
     for _, h in ipairs(vscodeHosts()) do segs[#segs + 1] = { kind = "VS", host = h } end
-    for _, l in ipairs(sshLinks()) do segs[#segs + 1] = { kind = "SSH", host = l.host, window = l.window } end
+    local sshHosts = {}
+    for _, l in ipairs(sshLinks()) do
+        if l.host ~= "" and not sshHosts[l.host] then
+            sshHosts[l.host] = true
+            segs[#segs + 1] = { kind = "SSH", host = l.host, window = l.window }
+        end
+    end
     for _, s in ipairs(segs) do
         key[#key + 1] = s.kind .. ":" .. s.host
         if not seen[s.host] then
@@ -512,10 +546,7 @@ local function sep() return hs.styledtext.new("  |  ", { color = SEP_COLOR, font
 -- Counts represent agent windows, with the color of the highest-priority window.
 local function summary(windows)
     if #windows == 0 then return segment(windows) end
-    local top = windows[1]
-    for _, w in ipairs(windows) do
-        if STATE_PRIORITY[w.state] > STATE_PRIORITY[top.state] then top = w end
-    end
+    local top = highestPriority(windows)
     return hs.styledtext.new("●", { color = { hex = top.color }, font = DOT_FONT }) .. label(tostring(#windows))
 end
 
@@ -689,6 +720,7 @@ local function clicked()
 end
 
 local function draw()
+    syncSshColors()
     local windows = agentWindows() or {} -- tmux down: still show the mode and the clock
     local mode, since = readMode()
 

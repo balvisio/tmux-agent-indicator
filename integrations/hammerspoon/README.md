@@ -35,6 +35,27 @@ counterparts because terminal themes can redefine those colors. When the backgro
 color, the dot uses the foreground, then neutral gray if neither is available. Inline `#[...]` colors
 inside a custom window label are outside this style-based integration.
 
+## SSH window colors in tmux
+
+The same remote poll publishes `@ssh_agent_host` and `@ssh_agent_color` on every local SSH window.
+The color comes from the highest-priority agent window on that host: needs-input > running > done >
+idle. Devcontainers are excluded. With no host agents, the color is green. Multiple SSH windows
+connected to the same host receive the same color without additional remote polls.
+
+Add this format helper to `.tmux.conf`, then prepend `#{E:@ssh_agent_title_style}` to both your
+existing `window-status-format` and `window-status-current-format` values:
+
+```tmux
+set -g @ssh_agent_title_style '#{?#{&&:#{==:#{pane_current_command},ssh},#{&&:#{==:#{@agent_label},},#{&&:#{==:#{@ssh_host},#{@ssh_agent_host}},#{@ssh_agent_color}}}},#[bg=#{@ssh_agent_color}#,fg=black#,noreverse],}'
+```
+
+Reload `.tmux.conf` and Hammerspoon after updating the module. The helper colors the SSH title's
+background, preserving the usual current-window marker and mouse target. It applies only when the
+active pane runs SSH and the window has no local agent label. The cached host must match `@ssh_host`,
+so switching destinations cannot apply the previous host's color. Disconnected windows and failed
+polls clear the override, returning to the normal tmux style. Updates continue in Do Not Disturb.
+Only custom display options are written; local agent states and saved window styles are unaffected.
+
 ## Existing companion configuration
 
 The script expects these window options from `scripts/agent-present.sh sweep` (often dispatched
