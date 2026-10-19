@@ -41,7 +41,7 @@ def main():
             def option(key):
                 return tmux("show-options", "-wqv", "-t", window, key)
 
-            # All of these are returned by ps -t pts/N on the affected Linux host.
+            # Simulate host and container processes sharing a pts/N name.
             # The foreign processes belong to a container, not this pane's tree.
             unrelated = ("900000001 900000000 /bin/bash\n"
                          "900000002 900000001 claude\n"

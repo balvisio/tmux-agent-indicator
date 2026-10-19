@@ -25,7 +25,7 @@ run_state "done"
 done_style="$(get_window_option "$WIN" "window-status-style")"
 [ "$done_style" = "bg=red,fg=black" ] || fail "active window title should be styled for done: $done_style"
 
-# The deferred reset is unchanged: focusing the pane clears the done styling.
+# Focusing the completed window clears its done styling.
 tmux_cmd run-shell "$ROOT_DIR/scripts/pane-focus-in.sh \"$PANE\" \"$WIN\""
 after_focus_style="$(get_window_option "$WIN" "window-status-style")"
 after_focus_state="$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")"

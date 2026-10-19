@@ -161,8 +161,7 @@ else
     pane_id=$(resolve_target_pane "$agent")
 fi
 if [ -z "$pane_id" ]; then
-    # No single pane owns this state (the agent is not running here, or several of its kind are):
-    # leave every window as it is rather than colour the wrong one.
+    # Ignore hooks that cannot be attributed to a live pane.
     exit 0
 fi
 
