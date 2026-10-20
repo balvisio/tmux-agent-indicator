@@ -38,6 +38,12 @@ The arrow sits after the clock and toggles directly, without opening a menu. Cli
 dots or clock opens the usual agent/mode menu; there are no layout options in it. The clock stays
 visible in every layout. Do Not Disturb hides the arrow and strip until On is selected again.
 Manual expansion/collapse lasts until Hammerspoon reloads, when automatic sizing resumes.
+Set `AGENT_DOTS.slackBadge = true` in `init.lua` before loading the module to hide Slack's Dock badge
+in Do Not Disturb and enable it while On. This uses macOS 26's private notification preferences and
+requires an unlocked **Notifications → Slack → Badge application icon** switch. Grant Hammerspoon
+Full Disk Access if the menu reports denied access. System Settings stays closed. Refreshing the
+notification service affects all apps; rapid toggles can delay badge changes by about 10 seconds.
+The dots menu reports failures; agent controls keep working.
 Automatic sizing measures the full title and collapses above 600 points or 30% of the narrowest
 connected screen, whichever is smaller. This is a conservative budget, not a measurement of space
 left by other menu-bar apps. Adjust `MAX_TITLE_WIDTH` near the top of the module to change the cap.
@@ -90,15 +96,14 @@ inspection additionally uses Docker on the remote host.
 
 ## Install from this checkout
 
-Copy `agent_dots.lua` to `~/.hammerspoon/agent_dots.lua`, retain a reference in `~/.hammerspoon/init.lua`,
-and reload Hammerspoon:
+Run `./install.sh`, then reload Hammerspoon. The installer copies the module and its Slack badge
+helper and adds the following line to `~/.hammerspoon/init.lua`:
 
 ```lua
-agentDots = require("agent_dots")
+require("agent_dots")
 ```
 
-The tmux plugin installer does not change Hammerspoon configuration. Keep a backup before replacing
-an independently customized copy. `~/.cache/agent_dots.state` records the most recent state and color
+`~/.cache/agent_dots.state` records the most recent state and color
 for each drawn window.
 
 Run `./tests/test-hammerspoon-dots.py` to check automatic sizing, arrow clicks, color conversion,

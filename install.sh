@@ -245,11 +245,12 @@ if [ "$UNINSTALL_ALL" = false ]; then
     cp "$SCRIPT_DIR/licenses/"*.txt "$TARGET_DIR/licenses/"
     cp "$SCRIPT_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"
     cp "$SCRIPT_DIR/scripts/"*.py "$TARGET_DIR/scripts/"
+    cp "$SCRIPT_DIR/scripts/slack-badge.js" "$TARGET_DIR/scripts/"
     cp "$SCRIPT_DIR/hooks/"*.json "$TARGET_DIR/hooks/"
     cp "$SCRIPT_DIR/plugins/"*.js "$TARGET_DIR/plugins/"
     cp "$SCRIPT_DIR/config/agent-indicator.conf" "$TARGET_DIR/config/"
     cp "$SCRIPT_DIR/install.sh" "$TARGET_DIR/"
-    cp "$SCRIPT_DIR/integrations/hammerspoon/agent_dots.lua" "$TARGET_DIR/integrations/hammerspoon/"
+    cp "$SCRIPT_DIR/integrations/hammerspoon/"*.lua "$TARGET_DIR/integrations/hammerspoon/"
 
     chmod +x "$TARGET_DIR/agent-indicator.tmux" "$TARGET_DIR/install.sh" "$TARGET_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"*.py
 fi

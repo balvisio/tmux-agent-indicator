@@ -67,6 +67,7 @@ local MODE_DIR = HOME .. "/.local/state/agent-dots"
 local MODE_FILE = MODE_DIR .. "/mode" -- same path is hard-coded in scripts/agent-sound.sh
 local PLUGIN_DIR = HOME .. "/.tmux/plugins/tmux-agent-indicator"
 local SOUND_SCRIPT = PLUGIN_DIR .. "/scripts/agent-sound.sh" -- plays Ping / Glass, honours MODE_FILE
+local slackBadge, slackBadgeNote
 local SSH = "/usr/bin/ssh"
 -- No prompts ever (BatchMode); our own multiplexed connection per host, kept 60 s past the last poll;
 -- RemoteCommand/RequestTTY override what ~/.ssh/config may set for interactive logins.
@@ -841,6 +842,8 @@ local function menu()
     }
     if hotkeyNote then table.insert(items, { title = hotkeyNote, disabled = true }) end
     if expansionHotkeyNote then table.insert(items, { title = expansionHotkeyNote, disabled = true }) end
+    local badgeNote = slackBadgeNote or (slackBadge and slackBadge.status())
+    if badgeNote then table.insert(items, { title = badgeNote, disabled = true }) end
     table.insert(items, { title = "-" })
     local attrs = menuTextAttrs()
     local windows = agentWindows()
@@ -934,7 +937,10 @@ local function draw()
 end
 
 refresh = function()
-    local ok, err = pcall(draw)
+    local ok, err = pcall(function()
+        if slackBadge then slackBadge.sync(readMode()) end
+        draw()
+    end)
     if not ok then note("error: " .. tostring(err)) end
 end
 
@@ -974,6 +980,13 @@ local function bindHotkey(config, purpose, callback)
 end
 
 os.execute("mkdir -p " .. HOME .. "/.cache " .. MODE_DIR)
+if SETTINGS.slackBadge == true then
+    local loaded, result = pcall(function()
+        return dofile(PLUGIN_DIR .. "/integrations/hammerspoon/slack_badge.lua").new(PLUGIN_DIR .. "/scripts/slack-badge.js")
+    end)
+    if loaded then slackBadge = result
+    else slackBadgeNote = "Slack badge: integration could not load"; note(slackBadgeNote .. ": " .. tostring(result)) end
+end
 local ok, err = pcall(function()
     REMOTE_B64 = hs.base64.encode(REMOTE_SCRIPT):gsub("%s+", "")
     menubar = hs.menubar.new()

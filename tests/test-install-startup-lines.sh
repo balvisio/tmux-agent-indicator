@@ -15,6 +15,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 install() { SHELL=/bin/bash "$ROOT_DIR/install.sh" --no-tmux-conf --no-hammerspoon --no-claude --no-codex --no-opencode >/dev/null; }
 
 install; install
+cmp "$ROOT_DIR/integrations/hammerspoon/slack_badge.lua" "$HOME/.tmux/plugins/tmux-agent-indicator/integrations/hammerspoon/slack_badge.lua" || fail "Slack badge helper must be installed"
+cmp "$ROOT_DIR/scripts/slack-badge.js" "$HOME/.tmux/plugins/tmux-agent-indicator/scripts/slack-badge.js" || fail "Slack preference helper must be installed"
 for f in .bash_profile .profile; do
     [ "$(grep -c "alias ssh-reconnect=" "$HOME/$f")" = 1 ] || fail "$f: alias must appear once"
     [ "$(grep -c "ssh-reconnect-completion.sh" "$HOME/$f")" = 1 ] || fail "$f: completion line must appear once"

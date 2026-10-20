@@ -613,3 +613,26 @@ AGENT_DOTS = {hotkey = false, expansionHotkey = {mods = {'ctrl'}, key = 'F8'}}
 local custom = dofile(arg[1])
 assert(custom.expansionHotkey.idx == 'ctrl:F8' and hotkeyFn, 'init.lua must be able to override the expansion key')
 print('PASS: expansion shortcut respects existing bindings, overrides, and disabling')
+
+local originalDofile, badgeModes = dofile, {}
+dofile = function(path)
+    if path:match('/slack_badge%.lua$') then
+        return {new = function() return {
+            sync = function(mode) badgeModes[#badgeModes + 1] = mode end,
+            status = function() return 'Slack badge: fixture failure' end,
+        } end}
+    end
+    return originalDofile(path)
+end
+AGENT_DOTS = {hotkey = false, expansionHotkey = false, slackBadge = true}
+local integrated = dofile(arg[1])
+integrated.setMode('dnd')
+assert(badgeModes[#badgeModes] == 'dnd', 'DND must reach the badge integration')
+local modeFile = assert(io.open(arg[2] .. '/.local/state/agent-dots/mode', 'w'))
+modeFile:write('on 123\n'):close()
+integrated.refresh()
+assert(badgeModes[#badgeModes] == 'on', 'external mode-file changes must reach the badge integration')
+assert(integrated.menu()[3].title == 'Slack badge: fixture failure', 'badge failure must be visible in the menu')
+assert(integrated.menu()[1].fn and integrated.menu()[2].fn, 'badge failure must leave mode controls usable')
+dofile = originalDofile
+print('PASS: optional Slack badge synchronization follows menu and external mode changes')

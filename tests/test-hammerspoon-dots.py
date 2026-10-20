@@ -20,6 +20,14 @@ def main():
     if not lua:
         print("SKIP: Hammerspoon integration checks require Lua (installed in CI)")
         return
+    subprocess.run([lua, str(ROOT / "tests/test-slack-badge.lua"),
+                    str(ROOT / "integrations/hammerspoon/slack_badge.lua")], check=True)
+    node = shutil.which("node")
+    if node:
+        subprocess.run([node, str(ROOT / "tests/test-slack-badge.js"),
+                        str(ROOT / "scripts/slack-badge.js")], check=True)
+    else:
+        print("SKIP: direct badge preference checks require Node.js")
     socket = "agent-dots-test-" + uuid.uuid4().hex[:12]
     environment = {key: value for key, value in os.environ.items() if key != "TMUX"}
     tmux_bin = shutil.which("tmux")

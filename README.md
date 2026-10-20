@@ -136,6 +136,22 @@ Press **F9** to expand or collapse the dots while On. To change that shortcut, a
 `expansionHotkey = { mods = {"cmd"}, key = "F9" }` to the same `AGENT_DOTS` table;
 use `expansionHotkey = false` to disable it. Existing shortcuts are left alone.
 
+To hide Slack's Dock badge during Do Not Disturb and show it again while On, add `slackBadge = true`
+to `AGENT_DOTS` in `~/.hammerspoon/init.lua`, before `require("agent_dots")`, then reload Hammerspoon:
+
+```lua
+AGENT_DOTS = { slackBadge = true }
+```
+
+This currently supports macOS 26 and uses private notification preferences; it never opens System
+Settings. Slack's **Badge application icon** setting must be unlocked. If access is denied, grant
+Hammerspoon **Full Disk Access** and reload it. The dots menu reports failures and retries after a
+minute; changing modes also retries. Slack messages remain unread.
+
+Startup and mode changes refresh your macOS notification service, which is shared by all apps. After
+rapid toggles, badge changes can take about 10 seconds. The preference format is checked
+before changing it; future macOS versions may require an update to this integration.
+
 Every other option is listed in the reference below.
 
 ### Keyboard passthrough to a remote tmux
