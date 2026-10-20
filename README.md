@@ -58,6 +58,9 @@ changes. `prefix` then **Ctrl-S** saves now; `prefix` then **Ctrl-R** restores t
 `ssh-reconnect` panes reopen their saved destination. Run the installer on remote hosts too if their
 tmux windows need recovery. Ordinary shell commands are not replayed.
 
+Kibitz pairs restore their reviewer role and connection to the host conversation. Update Kibitz
+with `kibitz install` before using recovery, so its reviewer launcher supports resuming conversations.
+
 Recovery reopens saved conversation history; it cannot resume an interrupted tool or recover text
 the agent had not saved. Keep the agents' own conversation storage. Snapshot files are retained under
 `~/.local/state/tmux-agent-indicator/recovery` (`$XDG_STATE_HOME` when set), including after uninstall.

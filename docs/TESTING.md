@@ -47,6 +47,9 @@ Run individual checks:
 ./tests/test-agent-recovery.py
 ```
 
+The recovery test restores two Kibitz pairs with new pane IDs, including a reviewer started before
+its host. It checks that each reviewer keeps its role and links to its own host conversation.
+
 The recovery test downloads the pinned Resurrect and Continuum dependencies into a temporary HOME.
 It uses fake agent CLIs on an isolated tmux socket, kills that server, and verifies automatic restart
 recovery of separate conversation IDs, splits, working directories and SSH launchers. It also checks

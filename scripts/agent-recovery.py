@@ -145,9 +145,10 @@ def ancestry(pid, procs):
 
 
 def panes():
-    fields = ["session_name", "window_index", "pane_index", "pane_id", "pane_pid", "pane_dead", OPTION]
+    fields = ["session_name", "window_index", "pane_index", "pane_id", "pane_pid", "pane_dead",
+              OPTION, "@name", "@kibitz_host_pane"]
     output = tmux("list-panes", "-a", "-F", "\t".join("#{" + key + "}" for key in fields))
-    return [line.split("\t", 6) for line in output.splitlines()]
+    return [line.split("\t", 8) for line in output.splitlines()]
 
 
 def request_save():
@@ -206,9 +207,51 @@ def resume_data(row, procs):
             return None
         if int(row[4]) not in set(ancestry(owner, procs)):
             return None
-        return {key: value for key, value in data.items() if key not in ("pid", "started")}
+        return {key: value for key, value in data.items() if key not in ("pid", "started", "kibitz")}
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def save_kibitz_pairs(rows, records):
+    by_id = {(row[0], row[3]): row for row in rows}
+    for row in rows:
+        data = records[tuple(row[:3])]
+        label, host_id = row[7:9]
+        host = by_id.get((row[0], host_id))
+        if not data or {"codex": "codex", "claude-reviewer": "claude"}.get(label) != data["kind"]:
+            continue
+        if not host or host_id == row[3] or host[:2] != row[:2]:
+            continue
+        host_data = records[tuple(host[:3])]
+        if not host_data or host_data["kind"] not in ("claude", "codex") or host[8]:
+            continue
+        # Pane IDs change when tmux restarts. Save the host's layout position and
+        # conversation identity so an unrelated replacement pane cannot become the host.
+        data["kibitz"] = {"label": label, "host": {
+            "position": host[:3], "kind": host_data["kind"], "session": host_data["session"],
+        }}
+
+
+def restore_kibitz_pair(data, pane):
+    pair = data["kibitz"]
+    expected = pair["host"]
+    # Resurrect starts pane commands independently; the reviewer can start before its host.
+    deadline = time.monotonic() + 120
+    while True:
+        rows = panes()
+        current = next((row for row in rows if row[3] == pane), None)
+        host = next((row for row in rows if row[:3] == expected["position"]), None)
+        if current and host and current[:2] == host[:2] and host[3] != pane:
+            host_data = resume_data(host, processes())
+            if host_data and all(host_data.get(key) == expected[key] for key in ("kind", "session")):
+                tmux("set-option", "-pq", "-t", pane, "@name", pair["label"], ";",
+                     "set-option", "-pq", "-t", pane, "@kibitz_host_pane", host[3])
+                return
+        if time.monotonic() >= deadline:
+            print("Kibitz host was not restored; reopening the reviewer without a link.",
+                  file=sys.stderr)
+            return
+        time.sleep(0.1)
 
 
 def encode(data):
@@ -263,6 +306,7 @@ def save(root):
     records = {(row[0], row[1], row[2]): resume_data(row, procs) for row in before}
     if not before:
         return
+    save_kibitz_pairs(before, records)
     with tempfile.TemporaryDirectory(prefix="agent-recovery-") as stage:
         run_resurrect("save", stage)
         raw = Path(stage, "last").read_text()
@@ -343,11 +387,17 @@ def resume(token):
         command = [str(SCRIPT.parent / "ssh-reconnect.sh"), *data["args"]]
     else:
         raise ValueError("unknown recovery command")
+    if data.get("kibitz"):
+        # The launcher owns the reviewer role and tool settings, including --no-daemon.
+        launcher = Path.home() / ".local/bin/kibitz_reviewer_launch"
+        command = [str(launcher), "resume", kind, data["session"]]
     if enabled() and os.environ.get("TMUX_PANE"):
         # Preserve identity while the resumed CLI loads, before its SessionStart hook can run.
         data.update(pid=os.getpid(), started=processes()[os.getpid()][1])
         tmux("set-option", "-pq", "-t", os.environ["TMUX_PANE"], OPTION,
              json.dumps(data, separators=(",", ":")))
+        if data.get("kibitz"):
+            restore_kibitz_pair(data, os.environ["TMUX_PANE"])
     os.execvp(command[0], command)
 
 

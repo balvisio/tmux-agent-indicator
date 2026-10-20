@@ -28,7 +28,8 @@ def main():
         work = Path(tmp)
         home = work / "home"
         home.mkdir()
-        env = {key: value for key, value in os.environ.items() if key not in ("TMUX", "TMUX_PANE", "BASH_ENV", "ENV")}
+        env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TERM", "USER", "LOGNAME")
+               if key in os.environ}
         env.update(HOME=str(home), ZDOTDIR=str(home), TMUX_TMPDIR=str(work),
                    CLAUDE_CONFIG_DIR=str(home / ".claude"), CODEX_HOME=str(home / ".codex"),
                    CODEX_CONFIG_DIR=str(home / ".codex"), XDG_CONFIG_HOME=str(home / ".config"),
@@ -45,8 +46,12 @@ import json, os, pathlib, subprocess, sys, time
 kind = pathlib.Path(sys.argv[0]).name
 args = [arg for arg in sys.argv[1:] if arg not in ('--no-daemon', 'resume', '--resume')]
 session = args[0]
+reviewer = os.environ.get('KIBITZ_TEST_REVIEWER') == '1'
+pair = subprocess.check_output(['tmux', 'display', '-p', '-t', os.environ['TMUX_PANE'],
+    '#{@name}|#{@kibitz_host_pane}'], text=True).strip() if reviewer else ''
 with open(os.environ['RECOVERY_LOG'], 'a') as out:
-    out.write(json.dumps({'kind': kind, 'session': session, 'cwd': os.getcwd(), 'args': sys.argv[1:]}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'session': session, 'cwd': os.getcwd(),
+        'args': sys.argv[1:], 'reviewer': reviewer, 'pair': pair}) + '\\n')
 event = {'session_id': session, 'cwd': os.getcwd(), 'hook_event_name': 'SessionStart'}
 subprocess.run([os.environ['RECOVERY_SCRIPT'], 'hook', kind], input=json.dumps(event), text=True, check=True)
 while True: time.sleep(1)
@@ -56,6 +61,17 @@ while True: time.sleep(1)
             (bins / name).chmod(0o755)
         (bins / "autossh").write_text("#!/bin/sh\nexec sleep 300\n")
         (bins / "autossh").chmod(0o755)
+        launcher = home / ".local/bin/kibitz_reviewer_launch"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("""#!/usr/bin/env python3
+import os, sys
+assert len(sys.argv) == 4 and sys.argv[1] == 'resume', sys.argv
+kind, session = sys.argv[2:]
+os.environ['KIBITZ_TEST_REVIEWER'] = '1'
+args = ['--no-daemon', 'resume', session] if kind == 'codex' else ['--resume', session]
+os.execvp(kind, [kind, *args])
+""")
+        launcher.chmod(0o755)
         env["PATH"] = str(bins) + ":" + env["PATH"]
         sock = work / "socket"
         neighbors = [work / "neighbor-1", work / "neighbor-2"]
@@ -63,8 +79,11 @@ while True: time.sleep(1)
         terminals = []
 
         def t(*args, check=True):
-            return subprocess.run(["tmux", "-S", str(sock), *args], env=env, text=True,
-                                  check=check, capture_output=True).stdout.strip()
+            result = subprocess.run(["tmux", "-S", str(sock), *args], env=env,
+                                    text=True, capture_output=True, cwd=work)
+            if check and result.returncode:
+                raise AssertionError(f"tmux {args}: {result.stderr}")
+            return result.stdout.strip()
 
         def run(*args, check=True):
             result = subprocess.run(args, env=env, text=True, capture_output=True)
@@ -91,6 +110,16 @@ while True: time.sleep(1)
         def logs():
             path = work / "agents.jsonl"
             return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+        def agent_panes():
+            result = {}
+            for line in t("list-panes", "-a", "-F", "#{pane_id}\t#{@agent_recovery}").splitlines():
+                pane, _, raw = line.partition("\t")
+                if raw:
+                    data = json.loads(raw)
+                    if data.get("session"):
+                        result[data["session"]] = pane
+            return result
 
         def attach(session):
             master, slave = pty.openpty()
@@ -123,7 +152,8 @@ while True: time.sleep(1)
             assert (plugins / "tmux-continuum/continuum.tmux").is_file()
             cwd = work / "project with spaces"
             cwd.mkdir()
-            t("-f", "/dev/null", "new-session", "-d", "-s", "work", "-x", "150", "-y", "40", "-c", str(cwd))
+            t("-f", "/dev/null", "new-session", "-d", "-s", "work", "-x", "150", "-y", "40",
+              "-c", str(cwd), "/bin/bash --noprofile --norc")
             env["TMUX"] = t("display", "-p", "#{socket_path},#{pid},0")
             run("bash", "-c", '. "$1"; another_tmux_server_running_on_startup', "bash",
                 str(plugins / "tmux-continuum/scripts/helpers.sh"))
@@ -151,12 +181,19 @@ assert recovery.state_dir() != first
                        str(bins / "codex") + " codex-two")
             third = t("new-window", "-d", "-P", "-F", "#{pane_id}", "-c", str(cwd),
                       str(bins / "codex") + " codex-three")
+            fourth = t("split-window", "-h", "-t", third, "-P", "-F", "#{pane_id}", "-c", str(cwd),
+                       str(bins / "claude") + " claude-four")
+            for reviewer, host, label in ((second, first, "codex"), (fourth, third, "claude-reviewer")):
+                t("set", "-p", "-t", reviewer, "@name", label, ";",
+                  "set", "-p", "-t", reviewer, "@kibitz_host_pane", host)
+            # Restore one reviewer before its host, exercising deferred link resolution.
+            t("swap-pane", "-d", "-s", third, "-t", fourth)
             ssh = t("new-window", "-d", "-P", "-F", "#{pane_id}",
                     str(installed / "scripts/ssh-reconnect.sh") + " recovery-fixture.invalid -p 2222")
             (work / "empty.txt").touch()
             t("new-window", "-d", "tail -f " + str(work / "empty.txt"))
             t("new-session", "-d", "-s", "z-editor")
-            for pane in (first, second, third, ssh):
+            for pane in (first, second, third, fourth, ssh):
                 wait_for(lambda p=pane: bool(t("show", "-pqv", "-t", p, "@agent_recovery")))
             snapshots = home / ".local/state/tmux-agent-indicator/recovery"
 
@@ -164,7 +201,7 @@ assert recovery.state_dir() != first
                 run(str(recovery), "save")
                 for path in snapshots.glob("*/last"):
                     snapshot = path.read_text()
-                    if snapshot.count("agent-recovery.py resume") == 4 and "pane\tz-editor\t" in snapshot:
+                    if snapshot.count("agent-recovery.py resume") == 5 and "pane\tz-editor\t" in snapshot:
                         return True
                 return False
 
@@ -172,14 +209,14 @@ assert recovery.state_dir() != first
             latest = next(snapshots.glob("*/last"))
             assert latest.is_file()
             original = latest.read_text()
-            assert original.count("agent-recovery.py resume") == 4, original
+            assert original.count("agent-recovery.py resume") == 5, original
             assert "state\t\t" in original, "the fixture must save without an attached client"
             windows = t("list-windows", "-t", "work", "-F", "#{window_index}|#{window_layout}")
 
             # Update while running: both status jobs survive, and hook entries remain singular.
             install()
             run(str(recovery), "setup")
-            assert len(logs()) == 3, "reloading after a snapshot is created must not restore it"
+            assert len(logs()) == 4, "reloading after a snapshot is created must not restore it"
             status = t("show", "-gqv", "status-right")
             assert status.count("continuum_save.sh") == 1 and "agent-present.sh sweep" in status
             assert status.count("?@agent_recovery_warning") == 1
@@ -206,7 +243,10 @@ assert recovery.state_dir() != first
             os.kill(server_pid, signal.SIGKILL)
             env.pop("TMUX")
             time.sleep(0.3)
-            t("-f", "/dev/null", "new-session", "-d", "-s", "work", "-x", "150", "-y", "40")
+            # Consume a pane ID so every restored pair must use new IDs.
+            t("-f", "/dev/null", "new-session", "-d", "-s", "placeholder", "/bin/sleep 300")
+            t("new-session", "-d", "-s", "work", "-x", "150", "-y", "40", "/bin/bash --noprofile --norc")
+            t("kill-session", "-t", "placeholder")
             env["TMUX"] = t("display", "-p", "#{socket_path},#{pid},0")
             terminal = attach("work")
             t("source-file", str(home / ".tmux.conf"))
@@ -220,9 +260,9 @@ assert recovery.state_dir() != first
             time.sleep(0.8)
             assert latest.read_text() == original, "startup saves replaced the unrestored snapshot"
             restore_release.touch()
-            wait_for(lambda: len(logs()) >= 6)
-            restored = logs()[3:]
-            assert sorted(item["session"] for item in restored) == ["claude-one", "codex-three", "codex-two"], restored
+            wait_for(lambda: len(logs()) >= 8)
+            restored = logs()[4:]
+            assert sorted(item["session"] for item in restored) == ["claude-four", "claude-one", "codex-three", "codex-two"], restored
             assert all(Path(item["cwd"]).resolve() == cwd.resolve() for item in restored)
             assert all("--no-daemon" in item["args"] for item in restored if item["kind"] == "codex")
             wait_for(lambda: "recovery-fixture.invalid" in t("list-panes", "-a", "-F", "#{@ssh_reconnect_host}"))
@@ -230,7 +270,17 @@ assert recovery.state_dir() != first
             wait_for(lambda: t("show", "-gqv", "@agent_recovery_startup") == "ready")
             restore_script.write_text(restore_source)
             assert client_sessions()[str(terminal.pid)] == "work", client_sessions()
-            assert len(t("list-panes", "-a").splitlines()) == 6
+            assert len(t("list-panes", "-a").splitlines()) == 7
+            agents = agent_panes()
+            for reviewer, host, label, old_host in (
+                    ("codex-two", "claude-one", "codex", first),
+                    ("claude-four", "codex-three", "claude-reviewer", third)):
+                assert agents[host] != old_host, "fixture must change the host pane IDs"
+                assert t("show", "-pqv", "-t", agents[reviewer], "@kibitz_host_pane") == agents[host]
+                launched = next(item for item in restored if item["session"] == reviewer)
+                assert launched["reviewer"] and launched["pair"] == label + "|" + agents[host], launched
+            assert all(not item["reviewer"] for item in restored if item["session"] in ("claude-one", "codex-three"))
+            print("PASS: two Kibitz pairs restore distinct host links before launching their reviewer roles", flush=True)
             assert "tail" not in t("list-panes", "-a", "-F", "#{pane_current_command}").splitlines()
             assert len(t("list-windows", "-t", "work").splitlines()) == len(windows.splitlines())
             before = len(logs())
@@ -278,8 +328,8 @@ assert recovery.state_dir() != first
             time.sleep(5.1)
             t("set", "-g", "@continuum-save-last-timestamp", "0")
             run(str(plugins / "tmux-continuum/scripts/continuum_save.sh"))
-            wait_for(lambda: latest.read_text().count("agent-recovery.py resume") == 3)
-            assert latest.read_text().count("agent-recovery.py resume") == 3
+            wait_for(lambda: latest.read_text().count("agent-recovery.py resume") == 4)
+            assert latest.read_text().count("agent-recovery.py resume") == 4
             saved = latest.read_text()
             # Turning the feature off must remove its callbacks without changing the agent sweep.
             t("set", "-g", "@agent-indicator-recovery", "off")
@@ -363,11 +413,11 @@ sys.exit(recovery.main())
             wait_for(lambda: t("show", "-gqv", "@agent_recovery_startup") == "ready")
             assert float(t("show", "-gqv", "@agent_recovery_loaded")) - int(t("display", "-p", "#{start_time}")) >= 12
             assert t("show", "-gqv", "@agent_recovery_restored")
-            wait_for(lambda: len(logs()) == before + 2)
+            wait_for(lambda: len(logs()) == before + 3)
             assert "recovery-fixture.invalid" in t("list-panes", "-a", "-F", "#{@ssh_reconnect_host}")
             assert t("show", "-gqv", "@agent_recovery_startup_reason") == "restore requested"
             t("source-file", str(home / ".tmux.conf"))
-            assert len(logs()) == before + 2
+            assert len(logs()) == before + 3
             print("PASS: delayed initial configuration restores conversations and SSH after the former startup deadline", flush=True)
 
             # Startup decisions are retained even without a successful automatic restoration.
