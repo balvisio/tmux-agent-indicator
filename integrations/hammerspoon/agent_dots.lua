@@ -11,7 +11,8 @@
 -- Each host is polled once every REMOTE_REFRESH seconds over our own ssh connection by a probe script
 -- that looks at the host's tmux and at the tmux inside every running VS Code dev container. One
 -- segment per place under VS: "VS - host" for the host's own tmux, "VS - host - container" for a dev
--- container. SSH shows only the host's own tmux: "SSH - host : ○" when it has no agent windows,
+-- container. Host sessions attached through VS Code stay under VS, including sessions outside containers.
+-- SSH shows the other host sessions: "SSH - host : ○" when it has no agent windows,
 -- regardless of agents in containers. A host under both sources is still polled once. A visible
 -- remote window that flips to needs-input / done plays the same Mac sound as a local one
 -- (the plugin's agent-sound.sh).
@@ -150,14 +151,14 @@ local REMOTE_SCRIPT = [==[
 # agent-dots remote probe: runs on the ssh host (sent inline by agent_dots.lua, base64 over ssh).
 #   poll <on|dnd>              list agent windows of the host tmux and of every VS Code dev container
 #                              (tmux found via /tmp/tmux-<uid>), and sync the Do Not Disturb mode there
-#   jump <spec> <session> <wid> select that window (spec = "host" or "<container-id>:<uid>")
+#   jump <spec> <session> <wid> <source> select that window (spec = "host" or "<container-id>:<uid>")
 # Output of poll, tab-separated:
 #   T <spec> <name>                                                    one per tmux server found
-#   W <spec> <name> <window_id> <index> <label> <active> <session> <state> <style>   one per agent window
+#   W <spec> <name> <window_id> <index> <label> <active> <session> <state> <style> <source>   one per agent window
 set -u
-cmd=${1:-poll}; a1=${2:-}; a2=${3:-}; a3=${4:-}
+cmd=${1:-poll}; a1=${2:-}; a2=${3:-}; a3=${4:-}; a4=${5:-}
 # tmux formats use | as separator: a C locale would turn tabs into "_" in tmux client output
-FMT_W='W|#{window_id}|#{window_index}|#{@agent_present}|#{@agent_label}|#{window_active}|#{session_name}|#{@agent-indicator-state}|__WINDOW_STYLE__'
+FMT_W='W|#{window_id}|#{window_index}|#{@agent_present}|#{@agent_label}|#{window_active}|#{session_name}|#{@agent-indicator-state}|__WINDOW_STYLE__|#{session_id}'
 
 tm() { # tm <spec> <tmux args...>
     local spec=$1; shift
@@ -194,9 +195,45 @@ sync_mode() { # sync_mode <spec> <mode>: write "<mode> <epoch>" to ~/.local/stat
     fi
 }
 
+client_source() {
+    local pid=$1
+    if [ -r "/proc/$pid/environ" ]; then
+        if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Eq '^(TERM_PROGRAM=vscode$|VSCODE_IPC_HOOK_CLI=.+)'; then
+            echo VS; return
+        fi
+    elif ps eww -p "$pid" -o command= 2>/dev/null | grep -Eq '(^| )(TERM_PROGRAM=vscode( |$)|VSCODE_IPC_HOOK_CLI=[^ ]+)'; then
+        echo VS; return
+    fi
+    echo SSH
+}
+
+session_sources() {
+    local sid pid source cached
+    while IFS= read -r sid; do
+        source=
+        while IFS= read -r pid; do
+            [ -n "$pid" ] || continue
+            # A session shared by both clients appears once, under SSH.
+            if [ "$(client_source "$pid")" = SSH ]; then source=SSH; break; fi
+            source=VS
+        done < <(tm host list-clients -t "$sid" -F '#{client_pid}')
+        cached=$(tm host show-options -qv -t "$sid" @agent_dots_source)
+        if [ -n "$source" ] && [ "$source" != "$cached" ]; then
+            tm host set-option -q -t "$sid" @agent_dots_source "$source"
+        fi
+        # Keep the last observed source while a session is detached.
+        printf '%s|%s,' "$sid" "${source:-${cached:-SSH}}"
+    done < <(tm host list-sessions -F '#{session_id}')
+}
+
 emit() { # emit <spec> <name>: consume the same window state used by tmux titles
-    local spec=$1 name=$2
-    tm "$spec" list-windows -a -F "$FMT_W" | awk -F'|' -v OFS='\t' -v spec="$spec" -v name="$name" '
+    local spec=$1 name=$2 sources=
+    [ "$spec" != host ] || sources=$(session_sources)
+    tm "$spec" list-windows -a -F "$FMT_W" | awk -F'|' -v OFS='\t' -v spec="$spec" -v name="$name" -v sources="$sources" '
+        BEGIN {
+            n=split(sources, rows, ",")
+            for (i=1; i<=n; i++) { split(rows[i], fields, "|"); source[fields[1]]=fields[2] }
+        }
         $1=="W" && $4=="1" {
             state=$8
             if (state != "idle" && state != "running" && state != "needs-input" && state != "done") {
@@ -208,7 +245,7 @@ emit() { # emit <spec> <name>: consume the same window state used by tmux titles
                     if (style[i]=="bg=red") state="done"
                 }
             }
-            print "W", spec, name, $2, $3, $5, $6, $7, state, $9
+            print "W", spec, name, $2, $3, $5, $6, $7, state, $9, (spec=="host" ? source[$10] : "VS")
         }'
 }
 
@@ -220,9 +257,13 @@ case "$cmd" in
             emit "$spec" "$name"
         done < <(targets) ;;
     jump)
-        for c in $(tm "$a1" list-clients -F '#{client_name}'); do tm "$a1" switch-client -c "$c" -t "$a2"; done
-        tm "$a1" select-window -t "$a3" ;;
-    *) echo "usage: poll <on|dnd> | jump <spec> <session> <window_id>" >&2; exit 2 ;;
+        while IFS='|' read -r c pid; do
+            [ -n "$c" ] || continue
+            [ "$a1" != host ] || [ "$(client_source "$pid")" = "$a4" ] || continue
+            tm "$a1" switch-client -c "$c" -t "$a2"
+        done < <(tm "$a1" list-clients -F '#{client_name}|#{client_pid}')
+        tm "$a1" select-window -t "$a2:$a3" ;;
+    *) echo "usage: poll <on|dnd> | jump <spec> <session> <window_id> <source>" >&2; exit 2 ;;
 esac
 exit 0
 ]==]
@@ -393,9 +434,10 @@ local function sshArgs(host, remoteArgs)
     return args
 end
 
--- A shared host poll includes dev containers for VS Code. Direct SSH represents only the host.
+-- VS Code owns its attached host sessions and containers. Other host sessions prefer direct SSH.
 local function belongsToSegment(seg, w)
-    return seg.kind ~= "SSH" or w.spec == "host"
+    if w.spec ~= "host" or w.source == "VS" then return seg.kind == "VS" end
+    return seg.kind == "SSH" or not seg.hasSSH
 end
 
 local function windowsForSegment(seg)
@@ -405,6 +447,14 @@ local function windowsForSegment(seg)
         if belongsToSegment(seg, w) then windows[#windows + 1] = w end
     end
     return windows
+end
+
+local function visibleSegments()
+    local result = {}
+    for _, seg in ipairs(segments) do
+        if not seg.hasSSH or #windowsForSegment(seg) > 0 then result[#result + 1] = seg end
+    end
+    return result
 end
 
 -- Publish only display options; local pane states and the plugin's style bookkeeping stay independent.
@@ -451,7 +501,7 @@ local function applyPoll(host, code, out, err)
             local color, tmuxColor = styleColor(f[10])
             local w = { spec = f[2], where = f[3], id = f[4], index = tonumber(f[5]) or 0, label = f[6],
                         active = (f[7] == "1"), session = f[8], state = STATES[f[9]] and f[9] or "idle",
-                        color = color, tmuxColor = tmuxColor }
+                        color = color, tmuxColor = tmuxColor, source = f[11] }
             windows[#windows + 1] = w
             local key = w.spec .. "/" .. w.id
             states[key] = w.state
@@ -506,6 +556,7 @@ local function pollAll()
         end
     end
     for _, s in ipairs(segs) do
+        s.hasSSH = s.kind == "VS" and sshHosts[s.host] or false
         key[#key + 1] = s.kind .. ":" .. s.host
         if not seen[s.host] then
             seen[s.host] = true
@@ -531,7 +582,7 @@ end
 -- segment, iTerm (on the ssh window) for an SSH segment.
 local function jumpRemote(seg, w)
     return function()
-        local t = hs.task.new(SSH, nil, sshArgs(seg.host, ("jump %s %s %s"):format(w.spec, shq(w.session), w.id)))
+        local t = hs.task.new(SSH, nil, sshArgs(seg.host, ("jump %s %s %s %s"):format(w.spec, shq(w.session), w.id, seg.kind)))
         if t and t:start() then lastJump = t end
         if seg.kind == "SSH" then
             if seg.window then shell(TMUX .. " select-window -t " .. seg.window) end
@@ -570,14 +621,16 @@ local function summary(windows)
     return hs.styledtext.new("●", { color = { hex = top.color }, font = DOT_FONT }) .. label(tostring(#windows))
 end
 
--- Remote windows grouped by place (the host's tmux, or one dev container), keeping their sorted order.
+-- VS Code host sessions get separate labels; containers and SSH host windows keep their place groups.
 local function byPlace(windows)
     local groups, index = {}, {}
     for _, w in ipairs(windows) do
-        local g = index[w.spec]
+        local session = w.spec == "host" and w.source == "VS" and w.session or nil
+        local key = w.spec .. (session and "/" .. session or "")
+        local g = index[key]
         if not g then
-            g = { spec = w.spec, where = w.where, windows = {} }
-            index[w.spec] = g
+            g = { spec = w.spec, where = w.where, session = session, windows = {} }
+            index[key] = g
             groups[#groups + 1] = g
         end
         g.windows[#g.windows + 1] = w
@@ -585,17 +638,18 @@ local function byPlace(windows)
     return groups
 end
 
--- "VS - host" / "SSH - host" for the host's own tmux, "… - container" for a dev container.
+-- Include the session or container name for VS Code places.
 local function segmentName(seg, g, kindName)
     local name = (kindName or seg.kind) .. " - " .. seg.host
-    if g and g.spec ~= "host" then name = name .. " - " .. g.where end
+    if g and g.spec ~= "host" then name = name .. " - " .. g.where
+    elseif g and g.session then name = name .. " - " .. (g.session:match("^vscode%-(.+)$") or g.session) end
     return name
 end
 
 -- At most two remote summaries, regardless of the number or length of host/container names.
 local function remoteSummary()
     local groups, order = {}, {}
-    for _, seg in ipairs(segments) do
+    for _, seg in ipairs(visibleSegments()) do
         local g = groups[seg.kind]
         if not g then
             g = { windows = {}, seen = {} }
@@ -637,7 +691,7 @@ local function title(mode, windows, since, collapsed, isExpanded)
         if collapsed then
             text = text .. remoteSummary()
         else
-            for _, seg in ipairs(segments) do
+            for _, seg in ipairs(visibleSegments()) do
                 local groups = byPlace(windowsForSegment(seg))
                 if #groups == 0 then
                     text = text .. sep() .. label(segmentName(seg) .. " : ") .. segment({})
@@ -689,7 +743,7 @@ local function drawPanel(windows)
         for _, w in ipairs(items) do textElement(dots({w}), 20, jump(w)) end
     end
     group("Terminal", windows, jumpTo)
-    for _, seg in ipairs(segments) do
+    for _, seg in ipairs(visibleSegments()) do
         local groups = byPlace(windowsForSegment(seg))
         if #groups == 0 then group(segmentName(seg), {}, function() end) end
         for _, g in ipairs(groups) do
@@ -773,7 +827,7 @@ local function windowsKey(windows)
     local parts = {}
     for _, w in ipairs(windows) do
         parts[#parts + 1] = (w.spec or "") .. ":" .. (w.where or "") .. ":" .. w.id
-            .. ":" .. w.state .. ":" .. w.color .. (w.active and "*" or "")
+            .. ":" .. (w.session or "") .. ":" .. w.state .. ":" .. w.color .. (w.active and "*" or "")
     end
     return table.concat(parts, ",")
 end
@@ -799,7 +853,7 @@ local function menu()
         table.insert(items, { title = "no agent windows", disabled = true })
     end
     -- One header per remote place, same wording as the menu bar: "VS Code - <host> - <place>" / "SSH - <host>".
-    for _, seg in ipairs(segments) do
+    for _, seg in ipairs(visibleSegments()) do
         local r = remote[seg.host]
         local groups = byPlace(windowsForSegment(seg))
         table.insert(items, { title = "-" })

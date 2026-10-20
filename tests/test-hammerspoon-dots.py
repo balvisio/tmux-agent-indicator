@@ -2,6 +2,7 @@
 """Exercise the menu bar with mock Hammerspoon and real isolated tmux queries."""
 
 import os
+import pty
 from pathlib import Path
 import shlex
 import shutil
@@ -34,6 +35,7 @@ def main():
         harness = [lua, str(ROOT / "tests/test-hammerspoon-dots.lua"),
                    str(ROOT / "integrations/hammerspoon/agent_dots.lua"), directory]
         subprocess.run(harness, check=True, capture_output=True, text=True)
+        clients, terminals = [], []
         try:
             tmux("-f", "/dev/null", "new-session", "-d", "-s", "test", "/bin/bash --noprofile --norc")
             tmux("set", "-g", "status-style", "bg=green,fg=white")
@@ -76,8 +78,8 @@ def main():
                 ["bash", str(fixture / "probe.sh"), "poll"], env=inside, text=True, timeout=8,
             )
             windows = [line.split("\t") for line in probe.splitlines() if line.startswith("W\t")]
-            assert len(windows) == 1 and len(windows[0]) == 10, windows
-            assert windows[0][8:] == ["running", expected_style], windows
+            assert len(windows) == 1 and len(windows[0]) == 11, windows
+            assert windows[0][8:] == ["running", expected_style, "SSH"], windows
             result = subprocess.run(harness, check=True, capture_output=True, text=True)
             for line in result.stdout.splitlines():
                 if line.startswith("PASS:"):
@@ -121,8 +123,68 @@ def main():
             tmux("set", "-w", "-t", ssh_window, "@ssh_agent_color", "")
             assert not title().startswith("#["), "failed polls must restore the normal title"
             print("PASS: published SSH colors render in tmux and respect host/local-agent guards")
+
+            # Real clients identify their source independently of the session name.
+            editor_window = tmux("new-session", "-d", "-P", "-F", "#{window_id}", "-s", "project",
+                                 "/bin/bash --noprofile --norc")
+            tmux("set", "-w", "-t", editor_window, "@agent_present", "1")
+
+            def attach(session, vscode=False):
+                master, slave = pty.openpty()
+                terminals.extend([master, slave])
+                env = {k: v for k, v in environment.items()
+                       if k != "TERM_PROGRAM" and not k.startswith("VSCODE_")}
+                env["TERM"] = "xterm-256color"
+                if vscode:
+                    env["TERM_PROGRAM"] = "vscode"
+                client = subprocess.Popen([tmux_bin, "-L", socket, "attach-session", "-t", session],
+                                          env=env, stdin=slave, stdout=slave, stderr=slave)
+                clients.append(client)
+                for _ in range(40):
+                    if str(client.pid) in tmux("list-clients", "-F", "#{client_pid}").splitlines():
+                        return client
+                    if client.poll() is not None:
+                        raise AssertionError("tmux client did not attach")
+                    time.sleep(0.05)
+                raise AssertionError("tmux client attachment timed out")
+
+            terminal = attach("test")
+            editor = attach("project", vscode=True)
+
+            def sources():
+                output = subprocess.check_output(["bash", str(fixture / "probe.sh"), "poll"],
+                                                 env=inside, text=True, timeout=8)
+                rows = [row.split("\t") for row in output.splitlines() if row.startswith("W\t")]
+                return {row[7]: row[10] for row in rows}
+
+            assert sources() == {"test": "SSH", "project": "VS"}, sources()
+            tmux("detach-client", "-s", "project")
+            editor.wait(timeout=5)
+            assert sources()["project"] == "VS", "detaching must preserve the session's source"
+            editor = attach("project", vscode=True)
+            shared = attach("project")
+            assert sources()["project"] == "SSH", "a shared session must appear once under SSH"
+            shared.terminate()
+            shared.wait(timeout=5)
+            assert sources()["project"] == "VS", "the remaining VS client must own its session"
+
+            # Clicking a dot must leave clients from the other application in their own session.
+            for session, window, source in [("test", "@0", "SSH"), ("project", editor_window, "VS")]:
+                subprocess.run(["bash", str(fixture / "probe.sh"), "jump", "host", session, window, source],
+                               env=inside, check=True, capture_output=True, text=True, timeout=8)
+                client_sessions = dict(row.split("|", 1) for row in
+                                       tmux("list-clients", "-F", "#{client_pid}|#{session_name}").splitlines())
+                assert client_sessions[str(terminal.pid)] == "test", client_sessions
+                assert client_sessions[str(editor.pid)] == "project", client_sessions
+            print("PASS: real tmux clients classify host sessions, retain detached sources, and keep jumps separate")
         finally:
             subprocess.run([tmux_bin, "-L", socket, "kill-server"], env=environment, capture_output=True)
+            for client in clients:
+                if client.poll() is None:
+                    client.terminate()
+                client.wait(timeout=5)
+            for fd in terminals:
+                os.close(fd)
 
 
 if __name__ == "__main__":

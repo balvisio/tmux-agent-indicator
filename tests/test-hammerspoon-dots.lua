@@ -232,6 +232,97 @@ dots.menu()
 assert(menuColors[1] == '#FF8700', 'remote menu dot did not adopt custom color')
 print('PASS: remote palette changes update dots and menus without false state notifications')
 
+vscode = true
+dots.pollAll()
+poll('running', 'needs-input', 'bg=yellow', 'bg=magenta')
+assert(not shown:find('VS - colossus :',1,true) and shown:find('SSH - colossus :',1,true),
+    'a shared host must be shown under SSH only')
+assert(shown:find('VS - colossus - kernelcatcher',1,true), 'VS Code containers must stay visible')
+local function hostMenuEntry()
+    local entry, count = nil, 0
+    for _, item in ipairs(dots.menu()) do
+        if item.indent == 1 and item.title:find('host-agent',1,true) then entry, count = item, count + 1 end
+    end
+    assert(count == 1, 'a shared host agent must appear exactly once in the dropdown')
+    return entry
+end
+hostMenuEntry().fn()
+assert(focusedApp == 'com.googlecode.iterm2' and selectedWindow:find('select-window -t @6',1,true),
+    'shared host menu entry must select its SSH window')
+sshOutput = ''
+dots.pollAll()
+poll('running', 'needs-input', 'bg=yellow', 'bg=magenta')
+assert(shown:find('VS - colossus :',1,true) and not shown:find('SSH - colossus',1,true),
+    'disconnecting SSH must return the host to VS Code')
+hostMenuEntry().fn()
+assert(focusedApp == 'com.microsoft.VSCode', 'VS-only host must focus VS Code')
+sshOutput = '@6\t5\tcolossus\n'
+dots.pollAll()
+dots.applyPoll('colossus',0,'T\thost\tcolossus\nW\thost\tcolossus\t@0\t1\thost-agent\t0\tmain\tidle\tbg=blue\n','')
+dots.refresh()
+assert(not shown:find('VS - colossus',1,true), 'an empty container-only source must not duplicate the host label')
+hostMenuEntry()
+dots.applyPoll('colossus',0,'T\thost\tcolossus\n','')
+dots.refresh()
+assert(shown:find('SSH - colossus : ○',1,true) and not shown:find('VS - colossus',1,true),
+    'an empty shared host needs only one hollow dot')
+print('PASS: shared hosts appear once, retain VS containers, and move back to VS Code after SSH disconnects')
+
+-- VS Code can run tmux directly on the host, without a devcontainer.
+local splitSources = 'T\thost\tcolossus\n'
+    .. 'W\thost\tcolossus\t@6\t0\tterminal-agent\t1\tmain\tidle\tbg=blue\tSSH\n'
+    .. 'W\thost\tcolossus\t@8\t0\teditor-agent\t1\tproject\tneeds-input\tbg=magenta\tVS\n'
+dots.applyPoll('colossus', 0, splitSources, '')
+dots.refresh()
+assert(shown:find('VS - colossus - project : ◉',1,true) and shown:find('SSH - colossus : ◉',1,true), shown)
+assert(sshOptions['@6']['@ssh_agent_color'] == 'blue', 'a waiting VS Code host session must not color SSH')
+local source, counts = nil, {VS = 0, SSH = 0}
+for _, item in ipairs(dots.menu()) do
+    if type(item.title) == 'string' then
+        if item.title:find('VS Code - colossus',1,true) then source = 'VS' end
+        if item.title:find('SSH - colossus',1,true) then source = 'SSH' end
+    end
+    if item.indent == 1 then
+        counts[source] = counts[source] + 1
+        assert(item.title:find(source == 'VS' and 'editor-agent' or 'terminal-agent',1,true), 'wrong host session source')
+        item.fn()
+        assert(focusedApp == (source == 'VS' and 'com.microsoft.VSCode' or 'com.googlecode.iterm2'))
+    end
+end
+assert(counts.VS == 1 and counts.SSH == 1, 'each host session must appear once under its source')
+local projects = splitSources:gsub('\tproject\t', '\tvscode-bionemo-framework\t')
+    .. 'W\thost\tcolossus\t@9\t1\tsecond-editor\t0\tother-project\tidle\tbg=blue\tVS\n'
+dots.applyPoll('colossus', 0, projects, '')
+dots.refresh()
+assert(shown:find('VS - colossus - bionemo-framework : ◉',1,true), shown)
+assert(shown:find('VS - colossus - other-project : ●',1,true), 'host projects need separate groups')
+local projectMenu = false
+for _, item in ipairs(dots.menu()) do
+    if item.title == 'VS Code - colossus - bionemo-framework' then projectMenu = true end
+end
+assert(projectMenu, 'the dropdown must include the project name')
+local renameRenders = renders
+dots.applyPoll('colossus', 0, projects:gsub('vscode%-bionemo%-framework', 'vscode-renamed-project'), '')
+dots.refresh()
+assert(renders == renameRenders + 1 and shown:find('VS - colossus - renamed-project',1,true),
+    'renaming a session must update its label without a state change')
+vscode = false
+dots.pollAll()
+dots.applyPoll('colossus', 0, splitSources, '')
+dots.refresh()
+assert(not shown:find('VS -',1,true) and #drawnColors == 1, 'VS host sessions must not leak into an SSH-only view')
+dots.applyPoll('colossus', 0, splitSources:gsub('editor%-agent\t1\tproject\tneeds%-input', 'editor-agent\t1\tproject\trunning'), '')
+beforeSounds = sounds
+dots.applyPoll('colossus', 0, splitSources, '')
+assert(sounds == beforeSounds, 'hidden VS host sessions must not notify through SSH')
+vscode = true
+dots.pollAll()
+dots.applyPoll('colossus', 0, splitSources:gsub('\tVS\n', '\tSSH\n'), '')
+dots.refresh()
+assert(not shown:find('VS - colossus',1,true) and shown:find('SSH - colossus : ◉ ◉',1,true),
+    'client source changes must update grouping without a state change')
+print('PASS: host VS Code sessions retain their source in dots, menus, colors, and notifications')
+
 local function clickFromRight(distance)
     local frame = dots.menubar:frame()
     mousePoint = {x = frame.x + frame.w - distance, y = frame.y + frame.h / 2}
@@ -249,7 +340,7 @@ beforeRenders = renders
 screenWidths = {5000, 1000}
 dots.refresh()
 assert(renders == beforeRenders + 1, 'screen changes must recalculate the layout without state changes')
-assert(shown:find('T: ●3  |  VS: ●4  |  SSH: ●1',1,true) and shown:match('%d+:%d%d  >$'), shown)
+assert(shown:find('T: ●3  |  VS: ●3  |  SSH: ●1',1,true) and shown:match('%d+:%d%d  >$'), shown)
 assert(#drawnColors == 3 and drawnColors[1] == '#D946EF'
     and drawnColors[2] == '#D946EF' and drawnColors[3] == '#EAB308',
     'local and remote summaries must use priority colors, and exclude containers from SSH')
@@ -261,20 +352,20 @@ for _, item in ipairs(dots.menu()) do
             and not item.title:find('Automatically'), 'layout controls must not appear in the dropdown')
     end
 end
-assert(remoteEntries == 5, 'compact layout must preserve every remote window in the menu')
+assert(remoteEntries == 4, 'each remote window must appear exactly once in the menu')
 screenWidths = {5000}
 dots.refresh()
 assert(shown:find('kernelcatcher',1,true), 'removing a narrow screen should restore full details')
 
 local longName = string.rep('long-container-name-', 20)
 poll('needs-input', 'running', 'bg=magenta', 'bg=yellow', longName)
-assert(shown:find('VS: ●4',1,true), 'long labels must collapse even on a wide screen')
+assert(shown:find('VS: ●3',1,true), 'long labels must collapse even on a wide screen')
 poll('done', 'idle', 'bg=red', 'bg=blue', longName)
 assert(drawnColors[2] == '#EF4444' and drawnColors[3] == '#3B82F6', 'done must beat idle')
 poll('done', 'running', 'bg=red', 'bg=yellow', longName)
-assert(drawnColors[2] == '#EAB308', 'running must beat done')
+assert(drawnColors[2] == '#EF4444' and drawnColors[3] == '#EAB308', 'host running state must not override container done state')
 poll('running', 'needs-input', 'bg=yellow', 'bg=#123abc', longName)
-assert(drawnColors[2] == '#123ABC', 'waiting must beat running and retain its actual custom color')
+assert(drawnColors[2] == '#EAB308' and drawnColors[3] == '#123ABC', 'host waiting state must remain in SSH with its custom color')
 poll('idle', nil, 'bg=blue', nil, longName)
 assert(shown:find('VS: ●3  |  SSH: ○',1,true) and shown:match('%d+:%d%d  >$'), shown)
 poll('idle', nil, 'bg=blue')
@@ -319,7 +410,7 @@ assert(renders == beforeRenders + 1, 'manual expansion must survive subsequent r
 screenWidths = {1000}
 dots.refresh()
 local panel = assert(dots.panel(), 'overflow must open the expanded strip')
-assert(shown:find('VS: ●4',1,true) and shown:match('%d+:%d%d  <$'), shown)
+assert(shown:find('VS: ●3',1,true) and shown:match('%d+:%d%d  <$'), shown)
 assert(not shown:find('kernelcatcher',1,true), 'overflow must not expand the menu-bar title')
 local function panelText()
     local parts = {}
@@ -337,9 +428,15 @@ local function panelText()
     return table.concat(parts)
 end
 assert(panelText():find('kernelcatcher',1,true), 'strip must show full container names')
+assert(not panelText():find('VS - colossus:',1,true), 'strip must not duplicate the SSH host under VS Code')
 assert(panel.bounds.y == 24 and panel.bounds.x >= 0 and panel.bounds.x + panel.bounds.w <= 1000)
 assert(panel.bounds.h == 32, 'strip must be a single tight row directly under the menu bar')
 assert(panel.bounds.w < 968, 'short contents must not leave a full-width empty strip')
+dots.applyPoll('colossus', 0, projects, '')
+dots.refresh()
+assert(panelText():find('VS - colossus - bionemo-framework',1,true),
+    'the floating strip must include the project name')
+poll('needs-input', 'running', 'bg=magenta', 'bg=yellow')
 local remoteAction
 for _, element in ipairs(panel.elements) do
     if element.id and element.id:find('window-',1,true) then remoteAction = element.id; break end
@@ -394,11 +491,11 @@ dots.refresh()
 print('PASS: adaptive inline/strip expansion, single-row scrolling, live states, clickable dots, screen bounds, and DND')
 
 clickFromRight(8)
-assert(shown:find('VS: ●4',1,true) and shown:match('%d+:%d%d  >$'), shown)
+assert(shown:find('VS: ●3',1,true) and shown:match('%d+:%d%d  >$'), shown)
 assert(popupCount == beforePopups, 'collapse arrow must not open the dropdown')
 screenWidths = {6000}
 dots.refresh()
-assert(shown:find('VS: ●4',1,true), 'manual collapse must survive a larger screen')
+assert(shown:find('VS: ●3',1,true), 'manual collapse must survive a larger screen')
 beforeRenders = renders
 clickFromRight(32) -- clock, outside the arrow's hit area
 assert(popupCount == beforePopups + 1 and renders == beforeRenders, 'clock must open menu without toggling')

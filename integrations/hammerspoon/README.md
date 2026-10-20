@@ -13,7 +13,13 @@ T: ●6  |  VS: ●3  |  SSH: ○  00:42  >
 Each source shows its agent-window count and a summary dot using the highest-priority
 window's actual color: needs-input > running > done > idle. An empty source keeps its hollow dot.
 Hosts and containers remain separate in the dropdown, with every window still selectable.
-Counts are per source: a host visible through both VS Code and SSH appears in both summaries.
+When both VS Code and SSH connect to a host, sessions attached through a VS Code terminal appear
+under VS Code, alongside its devcontainers. Other host sessions appear under SSH. The attached
+tmux client's environment identifies VS Code; session names do not affect grouping. Detached
+sessions keep their last observed source. A session attached from both sources appears once under
+SSH. If SSH disconnects, the remaining host agents appear under the VS Code group.
+VS Code host sessions include their session name in the label, with a leading `vscode-` omitted:
+`vscode-bionemo-framework` appears as `VS - linux-box - bionemo-framework`.
 
 Click **>** to expand into individual dots and host/container names, or **<** to collapse.
 Details appear in the menu bar when they fit. Otherwise, the bar keeps its summaries and opens a
@@ -50,9 +56,9 @@ inside a custom window label are outside this style-based integration.
 ## SSH window colors in tmux
 
 The same remote poll publishes `@ssh_agent_host` and `@ssh_agent_color` on every local SSH window.
-The color comes from the highest-priority agent window on that host: needs-input > running > done >
-idle. Devcontainers are excluded. With no host agents, the color is green. Multiple SSH windows
-connected to the same host receive the same color without additional remote polls.
+The color comes from the highest-priority agent window in the SSH group: needs-input > running > done >
+idle. VS Code sessions and devcontainers are excluded. With no SSH agents, the color is green.
+Multiple SSH windows connected to the same host receive the same color without additional remote polls.
 
 Add this format helper to `.tmux.conf`, then prepend `#{E:@ssh_agent_title_style}` to both your
 existing `window-status-format` and `window-status-current-format` values:
