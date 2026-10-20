@@ -129,8 +129,12 @@ the same again switches back. The colours keep working. Another key goes in `~/.
 before the `require` line (`hotkey = false` for none):
 
 ```lua
-AGENT_DOTS = { hotkey = { mods = {}, key = "F9" } }
+AGENT_DOTS = { hotkey = { mods = {"cmd"}, key = "F10" } }
 ```
+
+Press **F9** to expand or collapse the dots while On. To change that shortcut, add
+`expansionHotkey = { mods = {"cmd"}, key = "F9" }` to the same `AGENT_DOTS` table;
+use `expansionHotkey = false` to disable it. Existing shortcuts are left alone.
 
 Every other option is listed in the reference below.
 

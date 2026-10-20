@@ -52,11 +52,14 @@ local REMOTE_REFRESH = 3 -- seconds, each VS Code host
 local REMOTE_TIMEOUT = 20 -- seconds before a hung ssh poll is killed
 local MAX_TITLE_WIDTH = 600 -- points, also limited to 30% of the narrowest connected screen
 -- Settings a user may override from init.lua before the require line, e.g.
---   AGENT_DOTS = { hotkey = { mods = {}, key = "F9" } }   -- hotkey = false: no hotkey
+--   AGENT_DOTS = { expansionHotkey = { mods = {"cmd"}, key = "F9" } }
+-- Set hotkey or expansionHotkey to false to disable that binding.
 -- The installer overwrites this file on update; init.lua is left alone.
 local SETTINGS = type(rawget(_G, "AGENT_DOTS")) == "table" and AGENT_DOTS or {}
 local TOGGLE_HOTKEY = { mods = {}, key = "F10" } -- switches On <-> Do Not Disturb
 if SETTINGS.hotkey == false then TOGGLE_HOTKEY = {} elseif type(SETTINGS.hotkey) == "table" then TOGGLE_HOTKEY = SETTINGS.hotkey end
+local EXPANSION_HOTKEY = { mods = {}, key = "F9" }
+if SETTINGS.expansionHotkey == false then EXPANSION_HOTKEY = {} elseif type(SETTINGS.expansionHotkey) == "table" then EXPANSION_HOTKEY = SETTINGS.expansionHotkey end
 local HOME = os.getenv("HOME")
 local STATE_FILE = HOME .. "/.cache/agent_dots.state"
 local MODE_DIR = HOME .. "/.local/state/agent-dots"
@@ -228,10 +231,14 @@ REMOTE_SCRIPT = REMOTE_SCRIPT:gsub("__WINDOW_STYLE__", function() return WINDOW_
 local menubar, dropdown = nil, nil -- one visible item; a separate, hidden item supplies the popup menu
 local hotkey = nil -- kept referenced so the binding survives garbage collection
 local hotkeyNote = nil -- why the hotkey is not active, shown in the menu
+local expansionHotkey, expansionHotkeyNote = nil, nil
 local timer, remoteTimer = nil, nil
 local lastKey = nil -- fingerprint of what is currently drawn, to skip redundant redraws
-local compactOverride = nil -- start with automatic sizing; arrow clicks override until reload
-local compact = false -- layout currently shown
+local compactOverride = nil -- nil: automatic sizing; false: expanded inline or in the strip
+local expanded = false
+local panel, panelAnchor = nil, nil
+local panelActions = {}
+local panelOffset = 0
 local arrowWidth = 0 -- clickable width at the right edge; zero when DND hides the arrow
 local remote = {} -- host -> { windows, states, targets, ok, err, task, started }
 local segments = {} -- { kind = "VS" | "SSH", host, window = local ssh window id or nil }, display order
@@ -621,7 +628,7 @@ end
 
 -- Menu bar title: "T: <dots>" for the local tmux, then one "<segment name> : <dots>" per remote
 -- place with agent windows ("… : ○" when a host has none), or ⛔ alone; then the stopwatch and arrow.
-local function title(mode, windows, since, collapsed)
+local function title(mode, windows, since, collapsed, isExpanded)
     local text
     if mode == "dnd" then
         text = hs.styledtext.new(DND_GLYPH, { font = DOT_FONT })
@@ -642,8 +649,109 @@ local function title(mode, windows, since, collapsed)
         end
     end
     text = text .. hs.styledtext.new("  " .. clock(since), { color = CLOCK_COLOR, font = CLOCK_FONT })
-    if mode ~= "dnd" then text = text .. label(collapsed and "  >" or "  <") end
+    if mode ~= "dnd" then text = text .. label(isExpanded and "  <" or "  >") end
     return text
+end
+
+local function panelScreen()
+    local point = panelAnchor or hs.mouse.absolutePosition()
+    for _, screen in ipairs(hs.screen.allScreens()) do
+        local f = screen:fullFrame()
+        if point.x >= f.x and point.x < f.x + f.w and point.y >= f.y and point.y < f.y + f.h then
+            return screen
+        end
+    end
+    return hs.screen.mainScreen()
+end
+
+local function hidePanel()
+    if panel then panel:delete(); panel = nil end
+    panelActions = {}
+    panelOffset = 0
+end
+
+-- Size one row to its contents; scroll horizontally only when it exceeds the screen width.
+local function drawPanel(windows)
+    local screen = panelScreen()
+    local bounds, usable = screen:fullFrame(), screen:frame()
+    local padding, rowHeight, height = 10, 24, 32
+    local x, tokens = 0, {}
+    local function textElement(text, textWidth, action)
+        tokens[#tokens + 1] = { text = text, x = x, width = textWidth, action = action }
+        x = x + textWidth
+    end
+    local function group(name, items, jump)
+        local caption = name .. ": "
+        local captionWidth = hs.drawing.getTextDrawingSize(label(caption)).w
+        if x > 0 then x = x + 14 end
+        textElement(label(caption), captionWidth)
+        if #items == 0 then textElement(segment({}), 20) end
+        for _, w in ipairs(items) do textElement(dots({w}), 20, jump(w)) end
+    end
+    group("Terminal", windows, jumpTo)
+    for _, seg in ipairs(segments) do
+        local groups = byPlace(windowsForSegment(seg))
+        if #groups == 0 then group(segmentName(seg), {}, function() end) end
+        for _, g in ipairs(groups) do
+            group(segmentName(seg, g), g.windows, function(w) return jumpRemote(seg, w) end)
+        end
+    end
+    local width = math.min(math.ceil(x + padding * 2), bounds.w - 32)
+    local scrollable = x + padding * 2 > width
+    local left = scrollable and 30 or padding
+    local right = width - left
+    local maximumOffset = math.max(0, x - (right - left))
+    panelOffset = math.min(panelOffset, maximumOffset)
+    local elements, actions = {}, {}
+    elements[1] = { type = "rectangle", id = "background", action = "strokeAndFill",
+        roundedRectRadii = { xRadius = 5, yRadius = 5 },
+        fillColor = { hex = "#20242C", alpha = 0.97 }, strokeColor = { white = 1, alpha = 0.18 },
+        strokeWidth = 1, trackMouseUp = true, frame = { x = 0, y = 0, w = width, h = height } }
+    elements[2] = { type = "rectangle", action = "clip", frame = { x = left, y = 0, w = right - left, h = height } }
+    for i, token in ipairs(tokens) do
+        local position = left + token.x - panelOffset
+        local textHeight = hs.drawing.getTextDrawingSize(token.text).h
+        elements[#elements + 1] = { type = "text", text = token.text,
+            frame = { x = position, y = (height - textHeight) / 2, w = token.width, h = textHeight } }
+        local hitLeft, hitRight = math.max(left, position), math.min(right, position + token.width)
+        if token.action and hitRight > hitLeft then
+            local id = "window-" .. i
+            actions[id] = token.action
+            elements[#elements + 1] = { type = "rectangle", id = id, action = "fill",
+                fillColor = { white = 1, alpha = 0.001 }, trackMouseUp = true,
+                frame = { x = hitLeft, y = 4, w = hitRight - hitLeft, h = rowHeight } }
+        end
+    end
+    elements[#elements + 1] = { type = "resetClip" }
+    if scrollable then
+        for _, direction in ipairs({-1, 1}) do
+            local id = direction == -1 and "previous" or "next"
+            local available = direction == -1 and panelOffset > 0 or direction == 1 and panelOffset < maximumOffset
+            local arrow = hs.styledtext.new(direction == -1 and "<" or ">", {
+                font = LABEL_FONT, color = { white = available and 1 or 0.35 } })
+            local textHeight = hs.drawing.getTextDrawingSize(arrow).h
+            elements[#elements + 1] = { type = "text", id = id, trackMouseUp = true,
+                text = arrow,
+                frame = { x = direction == -1 and 10 or width - 20, y = (height - textHeight) / 2, w = 16, h = textHeight } }
+            actions[id] = function()
+                panelOffset = math.max(0, math.min(maximumOffset, panelOffset + direction * (right - left - 20)))
+                lastKey = nil
+                refresh()
+            end
+        end
+    end
+    local point = panelAnchor or hs.mouse.absolutePosition()
+    local frame = { x = math.max(bounds.x + 16, math.min(point.x + 8 - width, bounds.x + bounds.w - width - 16)),
+        y = math.max(usable.y, bounds.y + 24), w = width, h = height }
+    if not panel then
+        panel = assert(hs.canvas.new(frame), "cannot create expanded strip")
+        panel:level("status"):behavior({"canJoinAllSpaces", "fullScreenAuxiliary"}):clickActivating(false)
+        panel:mouseCallback(function(_, message, id)
+            if message == "mouseUp" and panelActions[id] then panelActions[id]() end
+        end)
+    end
+    panelActions = actions
+    panel:frame(frame):replaceElements(elements):show()
 end
 
 -- Dropdown line "<text> — ● <state>" with the dot in the state colour. The plain runs get the menu
@@ -678,6 +786,7 @@ local function menu()
         { title = MODES.dnd, checked = (mode == "dnd"), fn = function() setMode("dnd") end },
     }
     if hotkeyNote then table.insert(items, { title = hotkeyNote, disabled = true }) end
+    if expansionHotkeyNote then table.insert(items, { title = expansionHotkeyNote, disabled = true }) end
     table.insert(items, { title = "-" })
     local attrs = menuTextAttrs()
     local windows = agentWindows()
@@ -720,13 +829,19 @@ end
 
 -- An attached menu swallows the item's click callback. Keep it on a hidden item instead,
 -- so the visible title can distinguish the trailing arrow from the dots and clock.
+local function setExpanded(value, point)
+    compactOverride = not value
+    panelAnchor = point or hs.mouse.absolutePosition()
+    lastKey = nil
+    refresh()
+end
+
 local function clicked()
     local point = hs.mouse.absolutePosition()
     local frame = menubar:frame()
     if arrowWidth > 0 and frame and point.x >= frame.x + frame.w - arrowWidth
         and point.x <= frame.x + frame.w then
-        compactOverride = not compact
-        refresh()
+        setExpanded(not expanded, point)
     else
         dropdown:setMenu(menu())
         dropdown:popupMenu(point)
@@ -740,22 +855,28 @@ local function draw()
 
     local widthLimit = titleWidthLimit()
     local key = { mode, clock(since), tostring(compactOverride), tostring(widthLimit), "L=" .. windowsKey(windows) }
+    for _, screen in ipairs(hs.screen.allScreens()) do
+        local f, usable = screen:fullFrame(), screen:frame()
+        key[#key + 1] = table.concat({f.x, f.y, f.w, f.h, usable.y}, ",")
+    end
     for _, seg in ipairs(segments) do
         local r = remote[seg.host]
         key[#key + 1] = seg.kind .. ":" .. seg.host .. "=" .. (r.ok and windowsKey(windowsForSegment(seg)) or ("err:" .. tostring(r.err)))
     end
     key = table.concat(key, " ")
     if key == lastKey then return end
-    local text = title(mode, windows, since, false)
-    compact = mode ~= "dnd" and (compactOverride == true
-        or (compactOverride == nil and hs.drawing.getTextDrawingSize(text).w + 16 > widthLimit))
-    if compact then text = title(mode, windows, since, true) end
+    local text = title(mode, windows, since, false, true)
+    local tooWide = hs.drawing.getTextDrawingSize(text).w + 16 > widthLimit
+    expanded = mode ~= "dnd" and (compactOverride == false or (compactOverride == nil and not tooWide))
+    local compact = mode ~= "dnd" and (not expanded or tooWide)
+    if compact then text = title(mode, windows, since, true, expanded) end
     -- Include the space before the arrow and the native status item's right inset.
     arrowWidth = mode == "dnd" and 0 or hs.drawing.getTextDrawingSize(label(" >")).w + 8
     if not menubar:isInMenuBar() then menubar:returnToMenuBar() end
     menubar:setTitle(text)
+    if expanded and tooWide then drawPanel(windows) else hidePanel() end
     lastKey = key
-    note("drawn " .. (compact and "compact " or "expanded ") .. key)
+    note("drawn " .. (panel and "strip " or (compact and "compact " or "expanded ")) .. key)
 end
 
 refresh = function()
@@ -776,28 +897,41 @@ setMode = function(mode)
     refresh()
 end
 
+local function bindHotkey(config, purpose, callback)
+    if not config.key then return nil end
+    local mods, key = config.mods or {}, config.key
+    local name = (#mods > 0 and table.concat(mods, "+") .. "+" or "") .. key
+    local suffix = "; " .. purpose .. " key disabled"
+    local taken = hs.hotkey.systemAssigned(mods, key)
+    if taken and taken.enabled ~= false then return nil, name .. " is a macOS shortcut" .. suffix end
+    local binding = hs.hotkey.new(mods, key, callback)
+    if not binding then return nil, name .. " cannot be bound" .. suffix end
+    for _, other in ipairs(hs.hotkey.getHotkeys()) do
+        if other.idx == binding.idx then
+            binding:delete()
+            return nil, name .. " is already in use" .. suffix
+        end
+    end
+    if not binding:enable() then
+        binding:delete()
+        return nil, name .. " cannot be bound" .. suffix
+    end
+    return binding
+end
+
 os.execute("mkdir -p " .. HOME .. "/.cache " .. MODE_DIR)
 local ok, err = pcall(function()
     REMOTE_B64 = hs.base64.encode(REMOTE_SCRIPT):gsub("%s+", "")
     menubar = hs.menubar.new()
     dropdown = hs.menubar.new(false)
     menubar:setClickCallback(clicked)
-    -- Bind the toggle only when the key is free: not a macOS system shortcut, not refused by the
-    -- OS. A busy key leaves the menu as the way to switch modes and is reported there.
-    if TOGGLE_HOTKEY.key then
-        local mods, key = TOGGLE_HOTKEY.mods or {}, TOGGLE_HOTKEY.key
-        local name = (#mods > 0 and table.concat(mods, "+") .. "+" or "") .. key
-        local taken = hs.hotkey.systemAssigned and hs.hotkey.systemAssigned(mods, key)
-        if taken and taken.enabled ~= false then
-            hotkeyNote = name .. " is a macOS shortcut; no toggle key"
-        elseif hs.hotkey.assignable and not hs.hotkey.assignable(mods, key) then
-            hotkeyNote = name .. " cannot be bound; no toggle key"
-        else
-            hotkey = hs.hotkey.bind(mods, key, function() setMode(readMode() == "dnd" and "on" or "dnd") end)
-            if not hotkey then hotkeyNote = name .. " is already in use; no toggle key" end
-        end
-        if hotkeyNote then note(hotkeyNote) end
-    end
+    hotkey, hotkeyNote = bindHotkey(TOGGLE_HOTKEY, "mode toggle",
+        function() setMode(readMode() == "dnd" and "on" or "dnd") end)
+    expansionHotkey, expansionHotkeyNote = bindHotkey(EXPANSION_HOTKEY, "expansion", function()
+        if readMode() ~= "dnd" then setExpanded(not expanded) end
+    end)
+    if hotkeyNote then note(hotkeyNote) end
+    if expansionHotkeyNote then note(expansionHotkeyNote) end
 end)
 if ok then
     note("loaded")
@@ -812,6 +946,8 @@ end
 -- Returned so `require` keeps the timers and menubar referenced (Hammerspoon garbage-collects
 -- unreferenced timers). The rest is exposed for the offline harness.
 return { menubar = menubar, dropdown = dropdown, hotkey = hotkey, timer = timer, remoteTimer = remoteTimer, refresh = refresh, agentWindows = agentWindows,
+         expansionHotkey = expansionHotkey,
+         setExpanded = setExpanded, panel = function() return panel end,
          styleColor = styleColor, menu = menu, setMode = setMode, readMode = readMode, vscodeHosts = vscodeHosts, pollAll = pollAll,
          applyPoll = applyPoll, jumpRemote = jumpRemote, remote = remote, sshLinks = sshLinks,
          remoteHosts = function() return remoteHostList end, segments = function() return segments end }

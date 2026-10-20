@@ -16,10 +16,22 @@ Hosts and containers remain separate in the dropdown, with every window still se
 Counts are per source: a host visible through both VS Code and SSH appears in both summaries.
 
 Click **>** to expand into individual dots and host/container names, or **<** to collapse.
-The arrow sits after the clock and toggles directly, without opening a menu. Clicking the dots or
-clock opens the usual agent/mode menu; there are no layout options in it. The clock stays visible in
-both layouts and in Do Not Disturb (which hides the arrow). Manual toggles override the width limit
-until Hammerspoon reloads, when automatic sizing resumes.
+Details appear in the menu bar when they fit. Otherwise, the bar keeps its summaries and opens a
+floating strip directly below the menu bar on the screen where you clicked. The strip stays on one
+compact row, sizes to its contents, and lets you click a dot to select its window. If it exceeds the
+screen width, use its left/right controls to scroll. It updates while open and overlays application windows.
+Click **<** to close it. Changing screen sizes or connected hosts moves expanded details between the
+bar and the strip as needed.
+
+**F9** toggles expansion too, using the screen under the pointer for the floating strip. It is inactive
+in Do Not Disturb. Customize it with `AGENT_DOTS.expansionHotkey` in `init.lua` before loading the module
+(for example `{ mods = {"cmd"}, key = "F9" }`), or set it to `false` to disable it. If the shortcut is
+already assigned, the dropdown reports the conflict and the arrow remains available.
+
+The arrow sits after the clock and toggles directly, without opening a menu. Clicking the menu-bar
+dots or clock opens the usual agent/mode menu; there are no layout options in it. The clock stays
+visible in every layout. Do Not Disturb hides the arrow and strip until On is selected again.
+Manual expansion/collapse lasts until Hammerspoon reloads, when automatic sizing resumes.
 Automatic sizing measures the full title and collapses above 600 points or 30% of the narrowest
 connected screen, whichever is smaller. This is a conservative budget, not a measurement of space
 left by other menu-bar apps. Adjust `MAX_TITLE_WIDTH` near the top of the module to change the cap.

@@ -10,6 +10,8 @@ local menuColors = {}
 local sounds = 0
 local shown = ''
 local screenWidths = {5000}
+local screenOrigin = 0
+local selectedWindow, focusedApp = nil, nil
 local sshOutput = '@6\t5\tcolossus\n'
 local sshOptions = {}
 local sshWrites = 0
@@ -27,18 +29,32 @@ styled.__concat = function(a, b)
     local colors = {}
     for _, color in ipairs(a.colors) do colors[#colors+1] = color end
     for _, color in ipairs(b.colors) do colors[#colors+1] = color end
-    return setmetatable({text = a.text .. b.text, colors = colors}, styled)
+    return setmetatable({text = a.text .. b.text, colors = colors, height = math.max(a.height or 16, b.height or 16)}, styled)
 end
 styled.__index = {find = function(self, ...) return self.text:find(...) end}
 local hotkeyFn = nil
+local expansionFn = nil
+local activeHotkeys = {}
 hs = {
     hotkey = {
-        bind = function(mods, key, fn) assert(key == 'F9' and mods[1] == 'cmd', key); hotkeyFn = fn; return {} end,
+        new = function(mods, key, fn)
+            return {idx = table.concat(mods, '+') .. ':' .. key,
+                enable = function(self)
+                    activeHotkeys[#activeHotkeys+1] = self
+                    if key == 'F9' and #mods == 0 then expansionFn = fn else hotkeyFn = fn end
+                    return self
+                end,
+                delete = function(self) self.deleted = true end,
+            }
+        end,
+        getHotkeys = function() return activeHotkeys end,
         systemAssigned = function(mods, key) return key == 'F11' and {enabled = true} or nil end,
-        assignable = function() return true end,
     },
     execute = function(command)
-        if command:find('set-option -wq',1,true) then
+        if command:find('select-window',1,true) then
+            selectedWindow = command
+            return '', true
+        elseif command:find('set-option -wq',1,true) then
             sshWrites = sshWrites + 1
             sshCommand = command
             assert(not command:find('window-status',1,true), 'remote colors must not overwrite local agent styles')
@@ -74,16 +90,34 @@ hs = {
             menuColors[#menuColors+1] = attrs.color.hex
             colors[1] = attrs.color.hex
         end
-        return setmetatable({text = text, colors = colors}, styled)
+        return setmetatable({text = text, colors = colors, height = (attrs.font and attrs.font.size or 13) + 3}, styled)
     end},
-    drawing = {getTextDrawingSize = function(text) return {w = utf8.len(text.text) * 4} end},
+    drawing = {getTextDrawingSize = function(text) return {w = utf8.len(text.text) * 4, h = text.height or 16} end},
     screen = {allScreens = function()
         local screens = {}
+        local offset = screenOrigin
         for _, width in ipairs(screenWidths) do
-            screens[#screens+1] = {fullFrame = function() return {w = width} end}
+            local left = offset
+            screens[#screens+1] = {
+                fullFrame = function() return {x = left, y = 0, w = width, h = 1000} end,
+                frame = function() return {x = left, y = 24, w = width, h = 976} end,
+            }
+            offset = offset + width
         end
         return screens
     end},
+    application = {launchOrFocusByBundleID = function(bundle) focusedApp = bundle end},
+    canvas = {new = function(frame) return {
+        bounds = frame,
+        level = function(self) return self end,
+        behavior = function(self) return self end,
+        clickActivating = function(self, value) assert(value == false); return self end,
+        mouseCallback = function(self, callback) self.click = callback; return self end,
+        frame = function(self, value) if value then self.bounds = value; return self end; return self.bounds end,
+        replaceElements = function(self, elements) self.elements = elements; return self end,
+        show = function(self) self.visible = true; return self end,
+        delete = function(self) self.visible = false; self.deleted = true end,
+    } end},
     mouse = {absolutePosition = function() return mousePoint end},
     menubar = {new = function(visible) return {
         setMenu = function(self, items) self.items = items end,
@@ -102,6 +136,7 @@ hs = {
     task = {new = function() return {start=function() return false end,isRunning=function() return false end} end},
     host = {interfaceStyle=function() return 'Dark' end},
 }
+hs.screen.mainScreen = function() return hs.screen.allScreens()[1] end
 AGENT_DOTS = { hotkey = { mods = {'cmd'}, key = 'F9' } } -- init.lua-style override
 local dots = dofile(arg[1])
 assert(remoteScript:find('#{E:window-status-current-style}',1,true), 'remote poll must read actual title styles')
@@ -279,6 +314,85 @@ assert(shown:find('kernelcatcher',1,true) and shown:match('%d+:%d%d  <$'), shown
 assert(popupCount == beforePopups, 'arrow clicks must not open the dropdown')
 dots.refresh()
 assert(renders == beforeRenders + 1, 'manual expansion must survive subsequent refreshes')
+
+-- An expanded title that no longer fits moves into a strip; the top bar keeps its summary and clock.
+screenWidths = {1000}
+dots.refresh()
+local panel = assert(dots.panel(), 'overflow must open the expanded strip')
+assert(shown:find('VS: ●4',1,true) and shown:match('%d+:%d%d  <$'), shown)
+assert(not shown:find('kernelcatcher',1,true), 'overflow must not expand the menu-bar title')
+local function panelText()
+    local parts = {}
+    for _, element in ipairs(dots.panel().elements) do
+        if element.type == 'text' then
+            parts[#parts+1] = element.text.text
+            assert(element.frame.y + element.frame.h / 2 == dots.panel().bounds.h / 2,
+                'dots and labels must share the same vertical center')
+        end
+        if element.trackMouseUp then
+            assert(element.frame.x >= 0 and element.frame.x + element.frame.w <= dots.panel().bounds.w + 0.01,
+                'click targets must stay inside the visible strip')
+        end
+    end
+    return table.concat(parts)
+end
+assert(panelText():find('kernelcatcher',1,true), 'strip must show full container names')
+assert(panel.bounds.y == 24 and panel.bounds.x >= 0 and panel.bounds.x + panel.bounds.w <= 1000)
+assert(panel.bounds.h == 32, 'strip must be a single tight row directly under the menu bar')
+assert(panel.bounds.w < 968, 'short contents must not leave a full-width empty strip')
+local remoteAction
+for _, element in ipairs(panel.elements) do
+    if element.id and element.id:find('window-',1,true) then remoteAction = element.id; break end
+end
+assert(remoteAction, 'remote dots need clickable targets')
+panel.click(panel, 'mouseUp', remoteAction)
+assert(focusedApp == 'com.microsoft.VSCode', 'remote dot must focus its source app')
+poll('needs-input', 'running', 'bg=magenta', 'bg=yellow', longName)
+assert(panelText():find(longName,1,true), 'long labels must retain their full text for horizontal scrolling')
+assert(dots.panel().bounds.h == 32, 'overflow must stay on one row')
+local function firstCaptionX()
+    for _, element in ipairs(dots.panel().elements) do
+        if element.type == 'text' then return element.frame.x end
+    end
+end
+local originalX = firstCaptionX()
+dots.panel().click(dots.panel(), 'mouseUp', 'next')
+assert(firstCaptionX() < originalX, 'right arrow must reveal overflow horizontally')
+panelText()
+dots.panel().click(dots.panel(), 'mouseUp', 'previous')
+assert(firstCaptionX() == originalX, 'left arrow must return to the first group')
+localOutput = '@1\t1\t1\tcodex\t1\tneeds-input\tbg=magenta\n'
+dots.refresh()
+panel = dots.panel()
+for _, element in ipairs(panel.elements) do
+    if element.id and element.id:find('window-',1,true) then
+        panel.click(panel, 'mouseUp', element.id)
+        break
+    end
+end
+assert(selectedWindow and selectedWindow:find('select-window -t @1',1,true), 'local dots must select their window')
+assert(focusedApp == 'com.googlecode.iterm2', 'local dot must focus iTerm')
+assert(panelText():find('◉',1,true), 'live local state must reach the strip')
+screenOrigin = -1000
+dots.setExpanded(true, {x = -40, y = 12})
+assert(dots.panel().bounds.x >= -1000 and dots.panel().bounds.x + dots.panel().bounds.w <= 0,
+    'strip must stay on the screen where expansion was requested')
+dots.setMode('dnd')
+assert(not dots.panel() and shown:match('%d+:%d%d$'), 'DND must close the strip and retain the clock')
+dots.setMode('on')
+since = select(2, dots.readMode())
+poll('needs-input', 'running', 'bg=magenta', 'bg=yellow', longName)
+assert(dots.panel(), 'leaving DND must restore the chosen expanded view')
+clickFromRight(8)
+assert(not dots.panel() and shown:match('%d+:%d%d  >$'), 'arrow must close an overflowing strip')
+screenOrigin, screenWidths = 0, {5000}
+poll('needs-input', 'running', 'bg=magenta', 'bg=yellow')
+dots.setExpanded(true)
+assert(not dots.panel() and shown:find('kernelcatcher',1,true), 'details must return inline when they fit')
+localOutput = ''
+dots.refresh()
+print('PASS: adaptive inline/strip expansion, single-row scrolling, live states, clickable dots, screen bounds, and DND')
+
 clickFromRight(8)
 assert(shown:find('VS: ●4',1,true) and shown:match('%d+:%d%d  >$'), shown)
 assert(popupCount == beforePopups, 'collapse arrow must not open the dropdown')
@@ -307,6 +421,27 @@ assert(dots.readMode() == 'on', 'hotkey must switch Do Not Disturb back to On')
 print('PASS: the hotkey toggles Do Not Disturb')
 assert(shown:match('%d+:%d%d  >$'), 'DND must preserve the chosen compact layout')
 print('PASS: automatic sizing, local/remote summary priority, direct arrow clicks, clock, and menu access')
+
+assert(dots.expansionHotkey and expansionFn, 'F9 must bind expansion by default')
+local modeBefore, sinceBefore = dots.readMode()
+expansionFn()
+assert(shown:match('%d+:%d%d  <$'), 'F9 must expand inline when the details fit')
+expansionFn()
+assert(shown:match('%d+:%d%d  >$'), 'F9 must collapse inline details')
+screenWidths = {1000}
+poll('idle', 'idle', 'bg=blue', 'bg=blue', longName)
+expansionFn()
+assert(dots.panel(), 'F9 must open the overflow strip')
+expansionFn()
+assert(not dots.panel(), 'F9 must close the overflow strip')
+assert(select(1, dots.readMode()) == modeBefore and select(2, dots.readMode()) == sinceBefore,
+    'expansion must not change mode or restart the clock')
+dots.setMode('dnd')
+expansionFn()
+assert(not dots.panel() and dots.readMode() == 'dnd', 'F9 must respect Do Not Disturb')
+dots.setMode('on')
+screenWidths = {6000}
+print('PASS: F9 toggles inline and floating expansion without changing notification mode')
 
 sshOutput = '@6\t5\tcolossus\n@7\t6\tcolossus\n'
 dots.pollAll()
@@ -362,11 +497,22 @@ if fixturesFile then
 end
 
 -- A key macOS already uses must not be bound; the menu says so and still offers the mode switch.
-hotkeyFn = nil
-AGENT_DOTS = { hotkey = { mods = {}, key = 'F11' } }
+hotkeyFn, activeHotkeys = nil, {}
+AGENT_DOTS = { hotkey = { mods = {}, key = 'F11' }, expansionHotkey = false }
 local busy = dofile(arg[1])
 assert(hotkeyFn == nil and busy.hotkey == nil, 'system shortcut must not be bound')
 local busyMenu = busy.menu()
 assert(busyMenu[1].title == 'On' and busyMenu[2].title == 'Do Not Disturb', 'mode controls must remain')
 assert(busyMenu[3].disabled and busyMenu[3].title:find('F11', 1, true), 'menu must report the unavailable key')
 print('PASS: a busy hotkey is reported in the menu instead of being bound')
+assert(busy.expansionHotkey == nil, 'expansionHotkey=false must disable expansion binding')
+activeHotkeys = {{idx = ':F9'}}
+AGENT_DOTS = {hotkey = false}
+busy = dofile(arg[1])
+assert(busy.expansionHotkey == nil and #activeHotkeys == 1, 'F9 must not shadow an existing Hammerspoon shortcut')
+assert(busy.menu()[3].title:find('F9', 1, true), 'menu must report an occupied expansion key')
+activeHotkeys, hotkeyFn = {}, nil
+AGENT_DOTS = {hotkey = false, expansionHotkey = {mods = {'ctrl'}, key = 'F8'}}
+local custom = dofile(arg[1])
+assert(custom.expansionHotkey.idx == 'ctrl:F8' and hotkeyFn, 'init.lua must be able to override the expansion key')
+print('PASS: expansion shortcut respects existing bindings, overrides, and disabling')
