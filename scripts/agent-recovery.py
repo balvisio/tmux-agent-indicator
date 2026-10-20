@@ -215,9 +215,16 @@ def encode(data):
     return base64.urlsafe_b64encode(json.dumps(data, separators=(",", ":")).encode()).decode()
 
 
+def client_sessions():
+    output = tmux("list-clients", "-F", "#{client_name}\t#{client_pid}\t#{session_id}")
+    return {(name, pid): session for name, pid, session in
+            (line.split("\t") for line in output.splitlines())}
+
+
 def run_resurrect(action, stage, keep_existing=False):
     # Resurrect reads its directory from tmux. Our writer lock covers this temporary override.
     server = identity()
+    clients = client_sessions() if action == "restore" else {}
     settings = {"@resurrect-dir": stage}
     if keep_existing:
         settings["@resurrect-never-overwrite"] = "on"
@@ -235,6 +242,16 @@ def run_resurrect(action, stage, keep_existing=False):
                         tmux("set-option", "-gq", key, value)
                     else:
                         tmux("set-option", "-gqu", key)
+                # Resurrect switches clients while selecting saved windows. Keep each terminal
+                # on its requested session, including when a detached save has no selected session.
+                connected = client_sessions() if clients else {}
+                for (name, pid), session in clients.items():
+                    if (name, pid) in connected:
+                        try:
+                            tmux("switch-client", "-c", name, "-t", session)
+                        except subprocess.SubprocessError:
+                            # A client or its original session can disappear during restoration.
+                            pass
         except subprocess.SubprocessError:
             pass
 
@@ -340,15 +357,16 @@ def setup():
         return
     if not option("@agent_recovery_startup"):
         # Decide once, including when no snapshot exists or automatic restore is disabled.
-        # Loading into an established server must not replay a saved layout.
-        now = time.time()
+        # Config loading can be slow during login. The installer marks an existing server ready
+        # before reloading; a server's first configuration load has no elapsed-time cutoff.
         first_load = not option("@agent_recovery_loaded")
-        started = int(identity().rsplit("|", 1)[1])
-        max_delay = int(option("@continuum-restore-max-delay") or 10)
-        should_restore = (first_load and now - started < max_delay
-                          and option("@continuum-restore") == "on"
-                          and not (Path.home() / "tmux_no_auto_restore").exists())
-        tmux("set-option", "-gq", "@agent_recovery_loaded", str(now))
+        reason = ("already initialized" if not first_load else
+                  "restore disabled" if option("@continuum-restore") != "on" else
+                  "halt file present" if (Path.home() / "tmux_no_auto_restore").exists() else
+                  "restore requested")
+        should_restore = reason == "restore requested"
+        tmux("set-option", "-gq", "@agent_recovery_loaded", str(time.time()))
+        tmux("set-option", "-gq", "@agent_recovery_startup_reason", reason)
         tmux("set-option", "-gq", "@agent_recovery_startup", "pending" if should_restore else "ready")
     subprocess.run(["bash", str(RESURRECT / "resurrect.tmux")], check=True, capture_output=True)
     for action in ("save", "restore"):

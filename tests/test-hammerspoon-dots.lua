@@ -133,7 +133,11 @@ hs = {
         setTitle = function(_,text) shown=text.text; renders=renders+1; drawnColors=text.colors; menuColors={} end,
     } end},
     timer = {doEvery = function() return {} end},
-    task = {new = function() return {start=function() return false end,isRunning=function() return false end} end},
+    task = {new = function(executable, callback, args)
+        assert(executable:match('/scripts/vpn%-guard%.py$'), 'remote tasks must use the VPN guard')
+        assert(args[1] == '--probe' and args[2] == 'colossus', 'probes must check their destination without waiting')
+        return {start=function() return false end,isRunning=function() return false end}
+    end},
     host = {interfaceStyle=function() return 'Dark' end},
 }
 hs.screen.mainScreen = function() return hs.screen.allScreens()[1] end

@@ -63,8 +63,10 @@ the agent had not saved. Keep the agents' own conversation storage. Snapshot fil
 `~/.local/state/tmux-agent-indicator/recovery` (`$XDG_STATE_HOME` when set), including after uninstall.
 The latest 20 different snapshots are kept separately for each tmux socket in machine-local storage.
 Changing networks or renaming the machine does not change which snapshots are restored.
-Other tmux servers do not prevent saving or startup recovery. Reloading the configuration does not
-restore an old layout into an established server.
+Other tmux servers and slow configuration loading do not prevent startup recovery. The first
+configuration load decides whether to restore, once per server. Later reloads do not repeat it,
+and the installer skips restoration when updating an already-running server. Terminals attached
+when recovery begins stay on their chosen sessions after restoration.
 
 If a save fails, the tmux bar shows **Recovery: save failed** and the time of the last successful save.
 The warning stays until a save succeeds. Background failures leave your typing uninterrupted, and
@@ -96,6 +98,47 @@ meanwhile. Put `RequestTTY force` and `RemoteCommand tmux new-session -A -s main
 - Through the VS Code Remote-SSH terminal: the menu bar gains a `VS - HOST` segment while VS Code is
   connected. Without Hammerspoon, the remote can only ring the terminal bell; VS Code plays it only with
   `"accessibility.signals.terminalBell": { "sound": "on" }` in the user settings.
+
+### Wait for GlobalProtect
+
+On macOS, create `~/.config/tmux-agent-indicator/vpn.json` (`$XDG_CONFIG_HOME` when set):
+
+```json
+{
+  "provider": "globalprotect",
+  "auto_restart": true
+}
+```
+
+Start new `ssh-reconnect` sessions and reload Hammerspoon. SSH attempts, including restored windows
+and retries, wait until GlobalProtect's tunnel interface has its assigned IP address. Remote
+menu-bar checks also wait. Local conversations restore immediately. Plain `ssh` and VS Code's own
+connections are unchanged.
+
+If GlobalProtect reports an authenticated tunnel but its interface stays unavailable for two minutes,
+the guard restarts its `com.paloaltonetworks.gp.pangps` service in your login session. It does not
+restart while waiting for login or after a recorded manual disconnect. Recovery runs only while an
+SSH window is waiting or a remote menu-bar check is active.
+
+There is one restart per outage and at least 15 minutes between restarts. A successful connection
+allows recovery of a later outage. If macOS refuses the restart, the error appears in the waiting
+pane and remote dots menu; no password dialog opens. Set `"auto_restart": false` to keep the SSH
+guard without automatic restarts.
+
+To guard only selected SSH destinations, add `"hosts": ["colossus", "linux-*"]`. All destinations
+are guarded when `hosts` is omitted. Optional `connect_timeout` and `restart_cooldown` values are in
+seconds (defaults `120` and `900`, minimums `30` and `300`). The guard is disabled when this file is
+absent or `provider` is `"off"`; updates preserve the file.
+
+Check the current status or recovery log:
+
+```bash
+~/.tmux/plugins/tmux-agent-indicator/scripts/vpn-guard.py --check
+tail -n 30 "${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-indicator/vpn/events.log"
+```
+
+Automatic recovery reads GlobalProtect's local service log; log format changes can require an
+integration update. If the log is unreadable, interface checks still work but cannot arm recovery.
 
 ## Update
 

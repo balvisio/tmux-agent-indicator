@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exercise actual Resurrect/Continuum with disposable tmux servers and fake agent CLIs."""
+import fcntl
 import json
 import os
 from pathlib import Path
+import pty
 import shlex
 import signal
 import subprocess
@@ -57,6 +59,8 @@ while True: time.sleep(1)
         env["PATH"] = str(bins) + ":" + env["PATH"]
         sock = work / "socket"
         neighbors = [work / "neighbor-1", work / "neighbor-2"]
+        clients = []
+        terminals = []
 
         def t(*args, check=True):
             return subprocess.run(["tmux", "-S", str(sock), *args], env=env, text=True,
@@ -68,12 +72,40 @@ while True: time.sleep(1)
                 raise AssertionError(f"{args}: {result.stdout}\n{result.stderr}")
             return result
 
+        def stop_server():
+            pid = int(t("display", "-p", "#{pid}"))
+            t("kill-server")
+
+            def stopped():
+                try:
+                    os.kill(pid, 0)
+                    return False
+                except ProcessLookupError:
+                    return True
+
+            wait_for(stopped)
+
         def install():
             run(str(ROOT / "install.sh"), "--no-alias", "--no-hammerspoon", "--no-opencode")
 
         def logs():
             path = work / "agents.jsonl"
             return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+        def attach(session):
+            master, slave = pty.openpty()
+            terminals.extend((master, slave))
+            client_env = {key: value for key, value in env.items() if key not in ("TMUX", "TMUX_PANE")}
+            client_env["TERM"] = "xterm-256color"
+            client = subprocess.Popen(["tmux", "-S", str(sock), "attach-session", "-t", session],
+                                      env=client_env, stdin=slave, stdout=slave, stderr=slave)
+            clients.append(client)
+            wait_for(lambda: str(client.pid) in t("list-clients", "-F", "#{client_pid}").splitlines())
+            return client
+
+        def client_sessions():
+            return dict(line.split("\t") for line in
+                        t("list-clients", "-F", "#{client_pid}\t#{session_name}").splitlines())
 
         try:
             # Real extra servers exercise the process-count guard without changing ps output.
@@ -123,15 +155,26 @@ assert recovery.state_dir() != first
                     str(installed / "scripts/ssh-reconnect.sh") + " recovery-fixture.invalid -p 2222")
             (work / "empty.txt").touch()
             t("new-window", "-d", "tail -f " + str(work / "empty.txt"))
+            t("new-session", "-d", "-s", "z-editor")
             for pane in (first, second, third, ssh):
                 wait_for(lambda p=pane: bool(t("show", "-pqv", "-t", p, "@agent_recovery")))
-            time.sleep(1)
-            run(str(recovery), "save")
-            latest = next((home / ".local/state/tmux-agent-indicator/recovery").glob("*/last"))
+            snapshots = home / ".local/state/tmux-agent-indicator/recovery"
+
+            def saved_all():
+                run(str(recovery), "save")
+                for path in snapshots.glob("*/last"):
+                    snapshot = path.read_text()
+                    if snapshot.count("agent-recovery.py resume") == 4 and "pane\tz-editor\t" in snapshot:
+                        return True
+                return False
+
+            wait_for(saved_all)
+            latest = next(snapshots.glob("*/last"))
             assert latest.is_file()
             original = latest.read_text()
             assert original.count("agent-recovery.py resume") == 4, original
-            windows = t("list-windows", "-F", "#{window_index}|#{window_layout}")
+            assert "state\t\t" in original, "the fixture must save without an attached client"
+            windows = t("list-windows", "-t", "work", "-F", "#{window_index}|#{window_layout}")
 
             # Update while running: both status jobs survive, and hook entries remain singular.
             install()
@@ -163,8 +206,10 @@ assert recovery.state_dir() != first
             os.kill(server_pid, signal.SIGKILL)
             env.pop("TMUX")
             time.sleep(0.3)
-            t("-f", str(home / ".tmux.conf"), "new-session", "-d", "-s", "0", "-x", "150", "-y", "40")
+            t("-f", "/dev/null", "new-session", "-d", "-s", "work", "-x", "150", "-y", "40")
             env["TMUX"] = t("display", "-p", "#{socket_path},#{pid},0")
+            terminal = attach("work")
+            t("source-file", str(home / ".tmux.conf"))
             wait_for(restore_started.exists)
             assert t("show", "-gqv", "@agent_recovery_startup") == "pending"
             # A restore slower than the former five-second grace period must still protect last.
@@ -184,7 +229,8 @@ assert recovery.state_dir() != first
             wait_for(lambda: bool(t("show", "-gqv", "@agent_recovery_restored")))
             wait_for(lambda: t("show", "-gqv", "@agent_recovery_startup") == "ready")
             restore_script.write_text(restore_source)
-            assert len(t("list-panes", "-a").splitlines()) == 5
+            assert client_sessions()[str(terminal.pid)] == "work", client_sessions()
+            assert len(t("list-panes", "-a").splitlines()) == 6
             assert "tail" not in t("list-panes", "-a", "-F", "#{pane_current_command}").splitlines()
             assert len(t("list-windows", "-t", "work").splitlines()) == len(windows.splitlines())
             before = len(logs())
@@ -193,6 +239,37 @@ assert recovery.state_dir() != first
             time.sleep(0.5)
             assert len(logs()) == before
             print("PASS: startup restores conversations, splits and SSH with other servers running; saves wait for slow restoration", flush=True)
+
+            # Each terminal keeps its own session, even when the snapshot names another one.
+            editor = attach("z-editor")
+            expected_sessions = {str(terminal.pid): "work", str(editor.pid): "z-editor"}
+            snapshot = latest.read_text()
+            restore_count = work / "restore-count"
+            restore_script.write_text(
+                "#!/bin/sh\n" + "echo restore >> " + shlex.quote(str(restore_count)) + "\n"
+                "exec bash " + shlex.quote(str(restore_real)) + ' "$@"\n'
+            )
+            for saved_session in ("", "work", "z-editor"):
+                latest.write_text("\n".join(
+                    "state\t" + saved_session + "\t" if line.startswith("state\t") else line
+                    for line in snapshot.splitlines()) + "\n")
+                count = len(restore_count.read_text().splitlines()) if restore_count.exists() else 0
+
+                def restored():
+                    run(str(recovery), "restore", "manual")
+                    return restore_count.exists() and len(restore_count.read_text().splitlines()) > count
+
+                wait_for(restored)
+                assert client_sessions() == expected_sessions, client_sessions()
+            restore_script.write_text(restore_source)
+            for client in (terminal, editor):
+                name = t("list-clients", "-F", "#{client_pid}\t#{client_name}")
+                for line in name.splitlines():
+                    pid, target = line.split("\t")
+                    if pid == str(client.pid):
+                        t("detach-client", "-t", target)
+                client.wait(timeout=5)
+            print("PASS: restoration preserves each attached terminal's session with empty or conflicting saved selection", flush=True)
 
             # Killing one terminal agent removes just its resume command from the next snapshot.
             pane = t("list-panes", "-a", "-F", "#{pane_id}\t#{@agent_recovery}").splitlines()
@@ -213,9 +290,14 @@ assert recovery.state_dir() != first
             run(str(recovery), "setup")
             save_script = plugins / "tmux-resurrect/scripts/save.sh"
             save_source = save_script.read_text()
-            save_script.write_text("#!/bin/sh\necho 'fixture save failure details' >&2\nexit 1\n")
             health_file = latest.parent / "health.json"
-            success = json.loads(health_file.read_text())["last_success"]
+            # Finish any successful background writer before injecting a failure and recording
+            # the last good save. Snapshot publication precedes its health-file update.
+            with (latest.parent / "lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                save_script.write_text("#!/bin/sh\necho 'fixture save failure details' >&2\nexit 1\n")
+                success = json.loads(health_file.read_text())["last_success"]
+                saved = latest.read_text()
             active = t("display", "-p", "#{pane_id}")
             assert t("display", "-p", "-t", active, "#{pane_in_mode}") == "0"
             # Exercise the actual event hook and its background run-shell command.
@@ -270,24 +352,41 @@ sys.exit(recovery.main())
             save_script.write_text("#!/bin/sh\nexit 1\n")
             print("PASS: automatic failures log details and warn without entering view mode; successful saves clear the warning", flush=True)
 
+            # A real initial config load delayed beyond ten seconds must still restore.
+            stop_server()
+            env.pop("TMUX")
+            delayed = work / "slow-start.conf"
+            delayed.write_text("run-shell 'sleep 12'\nsource-file " + shlex.quote(str(home / ".tmux.conf")) + "\n")
+            before = len(logs())
+            t("-f", str(delayed), "new-session", "-d", "-s", "delayed")
+            env["TMUX"] = t("display", "-p", "#{socket_path},#{pid},0")
+            wait_for(lambda: t("show", "-gqv", "@agent_recovery_startup") == "ready")
+            assert float(t("show", "-gqv", "@agent_recovery_loaded")) - int(t("display", "-p", "#{start_time}")) >= 12
+            assert t("show", "-gqv", "@agent_recovery_restored")
+            wait_for(lambda: len(logs()) == before + 2)
+            assert "recovery-fixture.invalid" in t("list-panes", "-a", "-F", "#{@ssh_reconnect_host}")
+            assert t("show", "-gqv", "@agent_recovery_startup_reason") == "restore requested"
+            t("source-file", str(home / ".tmux.conf"))
+            assert len(logs()) == before + 2
+            print("PASS: delayed initial configuration restores conversations and SSH after the former startup deadline", flush=True)
+
             # Startup decisions are retained even without a successful automatic restoration.
             before = len(logs())
             halt = home / "tmux_no_auto_restore"
-            for mode in ("late-load", "restore-off", "halt-file"):
-                t("kill-server")
+            for mode in ("live-install", "restore-off", "halt-file"):
+                stop_server()
                 env.pop("TMUX")
-                extra = "set -g @continuum-restore-max-delay 1\n" if mode == "late-load" else ""
+                extra = ""
                 if mode == "restore-off":
                     extra += "set -g @continuum-restore off\n"
                 if mode == "halt-file":
                     halt.touch()
                 local_config.write_text(customizations + extra)
-                config = "/dev/null" if mode == "late-load" else str(home / ".tmux.conf")
+                config = "/dev/null" if mode == "live-install" else str(home / ".tmux.conf")
                 t("-f", config, "new-session", "-d", "-s", "untouched")
                 env["TMUX"] = t("display", "-p", "#{socket_path},#{pid},0")
-                if mode == "late-load":
-                    wait_for(lambda: time.time() - int(t("display", "-p", "#{start_time}")) >= 2)
-                    t("source-file", str(home / ".tmux.conf"))
+                if mode == "live-install":
+                    install()
                 wait_for(lambda: t("show", "-gqv", "@agent_recovery_startup") == "ready")
                 assert not t("show", "-gqv", "@agent_recovery_restored"), mode
                 assert t("list-sessions", "-F", "#{session_name}") == "untouched", mode
@@ -298,9 +397,9 @@ sys.exit(recovery.main())
                 time.sleep(1.2)
                 assert len(logs()) == before and not t("show", "-gqv", "@agent_recovery_restored"), mode
                 assert t("show", "-gqv", "status-right").count("continuum_save.sh") == 1
-            print("PASS: late configuration loads, disabled restore and the halt file prevent startup recovery across reloads", flush=True)
+            print("PASS: live installation, disabled restore and the halt file prevent startup recovery across reloads", flush=True)
 
-            t("kill-server")
+            stop_server()
             env.pop("TMUX")
             run(str(ROOT / "install.sh"), "--uninstall")
             assert not (plugins / "tmux-resurrect").exists()
@@ -329,6 +428,12 @@ sys.exit(recovery.main())
             raise
         finally:
             t("kill-server", check=False)
+            for client in clients:
+                if client.poll() is None:
+                    client.terminate()
+                client.wait(timeout=5)
+            for terminal in terminals:
+                os.close(terminal)
             for neighbor in neighbors:
                 run("tmux", "-S", str(neighbor), "kill-server", check=False)
 

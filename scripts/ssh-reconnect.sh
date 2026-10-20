@@ -56,6 +56,9 @@ if [ "$in_tmux" = 1 ]; then
 fi
 
 # Backgrounded only so this shell can react to signals; <&0 keeps the terminal as its input.
+# autossh invokes the guard for every attempt, including retries after a VPN drop.
+TMUX_AGENT_REAL_SSH="${AUTOSSH_PATH:-/usr/bin/ssh}" TMUX_AGENT_VPN_HOST="$host" \
+AUTOSSH_PATH="$script_dir/vpn-guard.py" \
 AUTOSSH_GATETIME=0 AUTOSSH_POLL=10 AUTOSSH_FIRST_POLL=10 \
     autossh -M 0 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -o ConnectTimeout=10 "$@" <&0 &
 child=$!

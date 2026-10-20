@@ -40,6 +40,7 @@ Run individual checks:
 ./tests/test-notification-command.sh
 ./tests/test-running-animation.sh
 ./tests/test-ssh-reconnect.sh
+./tests/test-vpn-guard.py
 ./tests/test-install-startup-lines.sh
 ./tests/test-ssh-passthrough.sh
 ./tests/test-agent-recovery.py
@@ -52,8 +53,17 @@ installer idempotence, failed saves, exited agents and uninstall ownership. Two 
 servers remain running throughout the test. Slow restoration cannot overwrite the saved layout, and
 reloads respect the startup decision and restore settings. It requires process-list access; run outside
 a process-restricting sandbox. It never kills the user's tmux server.
+An initial config load delayed by twelve seconds checks restoration after a slow login. Installation
+into a running server is checked separately to ensure it never starts an unsolicited restoration.
 It also checks lookup across hostname changes, error logs, the rendered failure warning, quiet
 background saves, nonzero manual failures, and warning removal after an unchanged successful save.
+Real terminal clients check that restoration preserves their sessions with an empty or conflicting
+saved session selection.
+
+The VPN guard tests use temporary configuration and mocked GlobalProtect state; they never restart
+the real VPN. A real autossh process with a fake SSH executable checks the initial wait, later retries,
+normal exit and termination during a wait. State-machine tests cover interface readiness, the timeout,
+manual disconnects, login waits, restart failures, cooldown and locking across destinations.
 
 The ancestry test launches hooks inside two separate panes while an unrelated window stays selected.
 It checks all four states with both a missing `TMUX_PANE` and a stale value naming the unrelated pane.

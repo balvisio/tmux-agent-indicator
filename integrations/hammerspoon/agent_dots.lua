@@ -68,7 +68,7 @@ local MODE_FILE = MODE_DIR .. "/mode" -- same path is hard-coded in scripts/agen
 local PLUGIN_DIR = HOME .. "/.tmux/plugins/tmux-agent-indicator"
 local SOUND_SCRIPT = PLUGIN_DIR .. "/scripts/agent-sound.sh" -- plays Ping / Glass, honours MODE_FILE
 local slackBadge, slackBadgeNote
-local SSH = "/usr/bin/ssh"
+local SSH = PLUGIN_DIR .. "/scripts/vpn-guard.py"
 -- No prompts ever (BatchMode); our own multiplexed connection per host, kept 60 s past the last poll;
 -- RemoteCommand/RequestTTY override what ~/.ssh/config may set for interactive logins.
 local SSH_OPTS = {
@@ -428,7 +428,7 @@ local function vscodeHosts()
 end
 
 local function sshArgs(host, remoteArgs)
-    local args = {}
+    local args = { "--probe", host }
     for _, o in ipairs(SSH_OPTS) do args[#args + 1] = o end
     args[#args + 1] = host
     args[#args + 1] = ("echo %s | base64 -d | bash -s -- %s"):format(REMOTE_B64, remoteArgs)

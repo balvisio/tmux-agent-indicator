@@ -619,6 +619,10 @@ fi
 if [ "$UNINSTALL_ALL" = false ]; then
     echo "Installed/updated tmux-agent-indicator in $TARGET_DIR"
     if [ "$INSTALL_TMUX_CONF" = true ] && tmux info >/dev/null 2>&1; then
+        # Installing into a running server must not replay an old layout. -o preserves any
+        # startup restore already pending on this server.
+        tmux set-option -goq @agent_recovery_startup ready
+        tmux set-option -goq @agent_recovery_startup_reason 'installer reload'
         # The defaults file ends by sourcing ~/.tmux/agent-indicator.local.conf, so the user's
         # customizations are reloaded intact. The whole ~/.tmux.conf is not sourced: it may hold
         # commands such as new-session that must not run twice.
