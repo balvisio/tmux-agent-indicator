@@ -199,6 +199,10 @@ Every other option is listed in the reference below.
 
 ### Keyboard passthrough to a remote tmux
 
+With `set -g mouse on`, clicking an SSH window or pane hands it keyboard control. Click the
+remote tmux's window list to select its windows directly. Clicking a local window or pane
+restores local controls.
+
 With a tmux running on the remote side, one key can hand it the keyboard (prefix and shortcuts
 included) and take it back. Add to `~/.tmux/agent-indicator.local.conf`, with the key of your choice:
 

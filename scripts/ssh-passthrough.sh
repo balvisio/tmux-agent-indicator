@@ -11,8 +11,8 @@ shift
 
 action="${1:-}"; session="${2:-}"; pane="${3:-}"
 case "$action" in
-    on|off|check) ;;
-    *) echo "usage: ${0##*/} on <session_id> <pane_id> | off|check <session_id>" >&2; exit 2 ;;
+    on|auto|off|check) ;;
+    *) echo "usage: ${0##*/} on|auto <session_id> <pane_id> | off|check <session_id>" >&2; exit 2 ;;
 esac
 [ -n "$session" ] || exit 2
 tmux has-session -t "$session" 2>/dev/null || exit 0
@@ -45,6 +45,14 @@ restore() {
     done
     tmux "${commands[@]}" set-option -t "$session" -qu @ssh_passthrough_pane
 }
+
+# Mouse selection happens before this helper runs. A queued click must not change
+# keyboard routing after the user has selected a different window or pane.
+if [ "$action" = auto ]; then
+    [ -n "$pane" ] || exit 0
+    [ "$(tmux display-message -p -t "$session" '#{pane_id}')" = "$pane" ] || exit 0
+    if pane_is_ssh; then action=on; else action=off; fi
+fi
 
 case "$action" in
     on)

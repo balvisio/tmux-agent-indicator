@@ -43,6 +43,7 @@ Run individual checks:
 ./tests/test-vpn-guard.py
 ./tests/test-install-startup-lines.sh
 ./tests/test-ssh-passthrough.sh
+./tests/test-ssh-mouse.py
 ./tests/test-agent-recovery.py
 ```
 
@@ -72,6 +73,8 @@ It also checks that detached Codex hooks are ignored despite a valid, stale `TMU
 
 The passthrough test checks keyboard-setting restoration, unchanged agent colours across window
 changes, plain SSH exit, reconnect retries and exit-triggered sweeps, and stale or closed owner panes.
+The mouse test sends terminal mouse events through two isolated, nested tmux servers. It checks
+local and remote status-bar clicks, split-pane clicks, manual toggles and stale selections.
 For a visual check, enable the README's F12 bindings in an isolated test session: the bar should turn
 orange while agent titles keep their colours, then return to its original style when passthrough ends.
 
