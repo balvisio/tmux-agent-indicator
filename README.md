@@ -102,7 +102,7 @@ meanwhile. Put `RequestTTY force` and `RemoteCommand tmux new-session -A -s main
   connected. Without Hammerspoon, the remote can only ring the terminal bell; VS Code plays it only with
   `"accessibility.signals.terminalBell": { "sound": "on" }` in the user settings.
 
-### Wait for GlobalProtect
+### Network access with GlobalProtect
 
 On macOS, create `~/.config/tmux-agent-indicator/vpn.json` (`$XDG_CONFIG_HOME` when set):
 
@@ -113,35 +113,54 @@ On macOS, create `~/.config/tmux-agent-indicator/vpn.json` (`$XDG_CONFIG_HOME` w
 }
 ```
 
-Start new `ssh-reconnect` sessions and reload Hammerspoon. SSH attempts, including restored windows
-and retries, wait until GlobalProtect's tunnel interface has its assigned IP address. Remote
-menu-bar checks also wait. Local conversations restore immediately. Plain `ssh` and VS Code's own
-connections are unchanged.
+Start new `ssh-reconnect` sessions and reload Hammerspoon. SSH attempts, including restored windows,
+retries and remote menu-bar checks, proceed when GlobalProtect detects an internal network or its
+VPN tunnel is ready. On an internal network, no VPN tunnel is needed. Otherwise they wait for
+GlobalProtect. Local conversations restore immediately. Plain `ssh` and VS Code's own connections
+are unchanged.
+
+Internal-network detection uses GlobalProtect's existing configuration. No office addresses, DNS
+names or Wi-Fi names need to be added to the plugin. A confirmed result survives log rotation while
+the network and service process stay unchanged. Network changes, wake and new discovery events
+invalidate it. Provider checks share a two-second cache.
+
+If the provider cannot confirm access, the guard checks the requested SSH destination before
+waiting or attempting VPN recovery. A reachable destination can proceed without a VPN tunnel.
+This check uses the alias, port and options from SSH configuration; it sends no application data
+and does not authenticate. It allows up to three seconds for configuration lookup and three for
+DNS/TCP connection, with failed checks retried at most every 15 seconds. Results apply only to that
+destination and are discarded on network changes. Connections configured with a proxy, jump host
+or bound interface still require a ready tunnel or confirmed internal network.
 
 If GlobalProtect reports an authenticated tunnel but its interface stays unavailable for two minutes,
 the guard restarts its `com.paloaltonetworks.gp.pangps` service in your login session. It does not
-restart while waiting for login or after a recorded manual disconnect. Recovery runs only while an
-SSH window is waiting or a remote menu-bar check is active.
+restart on an internal network, while waiting for login or after a recorded manual disconnect.
+An unavailable SSH server on an internal network does not trigger VPN recovery. Recovery runs only
+while an SSH window is waiting or a remote menu-bar check is active.
 
 There is one restart per outage and at least 15 minutes between restarts. A successful connection
 allows recovery of a later outage. If macOS refuses the restart, the error appears in the waiting
 pane and remote dots menu; no password dialog opens. Set `"auto_restart": false` to keep the SSH
 guard without automatic restarts.
 
-To guard only selected SSH destinations, add `"hosts": ["colossus", "linux-*"]`. All destinations
+To guard only selected SSH destinations, add `"hosts": ["work-host", "work-*"]`. All destinations
 are guarded when `hosts` is omitted. Optional `connect_timeout` and `restart_cooldown` values are in
 seconds (defaults `120` and `900`, minimums `30` and `300`). The guard is disabled when this file is
 absent or `provider` is `"off"`; updates preserve the file.
 
-Check the current status or recovery log:
+Check the provider status or recovery log:
 
 ```bash
 ~/.tmux/plugins/tmux-agent-indicator/scripts/vpn-guard.py --check
 tail -n 30 "${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-indicator/vpn/events.log"
 ```
 
-Automatic recovery reads GlobalProtect's local service log; log format changes can require an
-integration update. If the log is unreadable, interface checks still work but cannot arm recovery.
+Internal-network detection and automatic recovery read GlobalProtect's local service log; log
+format changes can require an integration update. If the log is unreadable, automatic recovery
+stays disabled; a ready tunnel or a successful destination check can still allow SSH. Guard state
+and diagnostics store network/destination digests, never their contents or raw service logs.
+Transition diagnostics include the checking process and code version. Keep any destination
+patterns in the local `vpn.json`; updates preserve that file.
 
 ## Update
 

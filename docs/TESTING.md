@@ -68,6 +68,12 @@ The VPN guard tests use temporary configuration and mocked GlobalProtect state; 
 the real VPN. A real autossh process with a fake SSH executable checks the initial wait, later retries,
 normal exit and termination during a wait. State-machine tests cover interface readiness, the timeout,
 manual disconnects, login waits, restart failures, cooldown and locking across destinations.
+Internal-network checks cover tunnel-free access, discovery restarts, office-to-home transitions,
+wake, service restarts, log rotation, stale results and the repeated DST hour. A loopback TCP
+listener verifies the destination fallback without sending application data; mocked failures check
+timeouts, per-destination caching, proxy handling, network changes during probes and lock isolation.
+Fixtures use synthetic provider events and network settings; no corporate configuration or captured
+service logs are included.
 
 The ancestry test launches hooks inside two separate panes while an unrelated window stays selected.
 It checks all four states with both a missing `TMUX_PANE` and a stale value naming the unrelated pane.
