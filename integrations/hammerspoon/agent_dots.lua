@@ -69,12 +69,13 @@ local PLUGIN_DIR = HOME .. "/.tmux/plugins/tmux-agent-indicator"
 local SOUND_SCRIPT = PLUGIN_DIR .. "/scripts/agent-sound.sh" -- plays Ping / Glass, honours MODE_FILE
 local slackBadge, slackBadgeNote
 local SSH = PLUGIN_DIR .. "/scripts/vpn-guard.py"
--- No prompts ever (BatchMode); our own multiplexed connection per host, kept 60 s past the last poll;
--- RemoteCommand/RequestTTY override what ~/.ssh/config may set for interactive logins.
+-- No prompts or background masters: ControlPersist can retain an hs.task output pipe after
+-- the probe exits, blocking Hammerspoon's main thread while it waits for EOF.
+-- Override interactive-login settings without changing the user's SSH configuration.
 local SSH_OPTS = {
     "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
     "-o", "RemoteCommand=none", "-o", "RequestTTY=no", "-o", "LogLevel=ERROR",
-    "-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/cm-agentdots-%C", "-o", "ControlPersist=60",
+    "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
 }
 
 local MODES = { on = "On", dnd = "Do Not Disturb" }
@@ -524,15 +525,16 @@ end
 local function pollRemote(host)
     local r = remote[host]
     if r.task then
-        if r.task:isRunning() then
-            if os.time() - (r.started or 0) < REMOTE_TIMEOUT then return end
-            r.task:terminate()
-            r.ok, r.err = false, "timeout"
-        end
+        if os.time() - (r.started or 0) < REMOTE_TIMEOUT then return end
+        local expired = r.task
         r.task = nil
+        if expired:isRunning() then expired:terminate() end
+        r.ok, r.err = false, "timeout"
     end
     local mode = readMode()
-    local task = hs.task.new(SSH, function(code, out, err)
+    local task
+    task = hs.task.new(SSH, function(code, out, err)
+        if remote[host] ~= r or r.task ~= task then return end
         r.task = nil
         local ok, e = pcall(applyPoll, host, code, out, err)
         if not ok then note("remote " .. host .. " error: " .. tostring(e)) end
@@ -569,8 +571,8 @@ local function pollAll()
     key = table.concat(key, ",")
     for h, r in pairs(remote) do
         if not seen[h] then
-            if r.task and r.task:isRunning() then r.task:terminate() end
             remote[h] = nil
+            if r.task and r.task:isRunning() then r.task:terminate() end
         end
     end
     local changed = (key ~= segmentsKey)

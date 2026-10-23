@@ -43,6 +43,24 @@ def main():
         harness = [lua, str(ROOT / "tests/test-hammerspoon-dots.lua"),
                    str(ROOT / "integrations/hammerspoon/agent_dots.lua"), directory]
         subprocess.run(harness, check=True, capture_output=True, text=True)
+        # An interactive SSH configuration must not make a probe fork or reuse a
+        # background master, which could retain Hammerspoon's output pipes.
+        ssh = shutil.which("ssh")
+        if ssh:
+            config = fixture / "ssh_config"
+            config.write_text("Host *\n  ControlMaster auto\n  ControlPath /tmp/fixture-master\n"
+                              "  ControlPersist 60\n  ForkAfterAuthentication yes\n")
+            args = (fixture / "ssh-args.txt").read_text().splitlines()
+            effective = subprocess.check_output(
+                [ssh, "-G", "-F", str(config), *args[2:-2], "fixture.invalid"],
+                text=True, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            settings = dict(line.split(" ", 1) for line in effective.splitlines())
+            assert settings["controlmaster"] == "false", settings["controlmaster"]
+            assert settings["controlpersist"] in ("no", "0"), settings["controlpersist"]
+            assert settings["forkafterauthentication"] == "no", settings["forkafterauthentication"]
+            assert settings.get("controlpath", "none") == "none", settings.get("controlpath")
+            print("PASS: real SSH configuration cannot enable background masters for indicator probes")
         clients, terminals = [], []
         try:
             tmux("-f", "/dev/null", "new-session", "-d", "-s", "test", "/bin/bash --noprofile --norc")

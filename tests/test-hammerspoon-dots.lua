@@ -19,6 +19,7 @@ local sshCommand
 local mousePoint = {x = 0, y = 0}
 local popupCount = 0
 local popupItems = nil
+local tasks, startTasks = {}, false
 local styled = {}
 local function asStyled(value)
     if type(value) == 'table' then return value end
@@ -136,7 +137,20 @@ hs = {
     task = {new = function(executable, callback, args)
         assert(executable:match('/scripts/vpn%-guard%.py$'), 'remote tasks must use the VPN guard')
         assert(args[1] == '--probe' and args[2] == 'colossus', 'probes must check their destination without waiting')
-        return {start=function() return false end,isRunning=function() return false end}
+        local options = {}
+        for _, value in ipairs(args) do
+            local key, setting = value:match('^(%w+)=(.*)$')
+            if key then options[key] = setting end
+        end
+        assert(options.ControlMaster == 'no' and options.ControlPath == 'none'
+            and options.ControlPersist == 'no' and options.ForkAfterAuthentication == 'no',
+            'background SSH masters can retain task pipes and freeze Hammerspoon')
+        local task = {callback = callback, args = args,
+            start = function(self) self.running = startTasks; return startTasks end,
+            isRunning = function(self) return self.running end,
+            terminate = function(self) self.running = false; self.terminated = true end}
+        tasks[#tasks + 1] = task
+        return task
     end},
     host = {interfaceStyle=function() return 'Dark' end},
 }
@@ -580,7 +594,45 @@ colorCommand:write(sshCommand)
 colorCommand:close()
 print('PASS: SSH titles share host priority, update duplicate windows, and clear disconnected/failed polls')
 
+startTasks = true
+dots.pollAll()
+local first = tasks[#tasks]
+assert(dots.remote.colossus.task == first)
+first.running = false -- Process exited; Hammerspoon has not delivered its callback yet.
+dots.pollAll()
+assert(tasks[#tasks] == first, 'wait for a pending callback before starting another poll')
+first.callback(0, hostPoll, '')
+assert(dots.remote.colossus.ok and dots.remote.colossus.task == nil)
+dots.pollAll()
+local expired = tasks[#tasks]
+dots.remote.colossus.started = os.time() - 21
+dots.pollAll()
+local replacement = tasks[#tasks]
+assert(expired.terminated and replacement ~= expired, 'expire a stalled probe and retry')
+expired.callback(0, hostPoll, '')
+assert(dots.remote.colossus.task == replacement and not dots.remote.colossus.ok,
+    'a late success must not replace the timeout or clear the new task')
+replacement.callback(0, hostPoll, '')
+assert(dots.remote.colossus.ok and dots.remote.colossus.task == nil)
+dots.pollAll()
+local removed = tasks[#tasks]
+vscode, sshOutput = false, ''
+dots.pollAll()
+assert(removed.terminated and not dots.remote.colossus, 'removed hosts must stop polling')
+sshOutput = '@6\t5\tcolossus\n'
+dots.pollAll()
+local reconnected = tasks[#tasks]
+removed.callback(255, '', 'old failure')
+assert(dots.remote.colossus.task == reconnected and dots.remote.colossus.err == nil,
+    'a removed host callback must not corrupt a reconnected host')
+reconnected.callback(0, hostPoll, '')
+vscode, startTasks = true, false
+print('PASS: foreground probes, pending completions, timeouts, late callbacks, and host reconnection')
+
 -- The Python harness runs these exact queries against an isolated tmux server.
+local arguments = assert(io.open(arg[2] .. '/ssh-args.txt', 'w'))
+for _, value in ipairs(first.args) do arguments:write(value, '\n') end
+arguments:close()
 local probe = assert(io.open(arg[2] .. '/probe.sh', 'w'))
 probe:write(remoteScript)
 probe:close()
