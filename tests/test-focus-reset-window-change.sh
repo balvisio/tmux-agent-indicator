@@ -22,7 +22,10 @@ tmux_cmd set-hook -gu after-select-pane
 # Window switches that bypass select-window (status-bar mouse clicks run switch-client;
 # next-/previous-/last-window have no after-* hooks) only fire session-window-changed.
 tmux_cmd last-window
-sleep 0.2
+for _ in $(seq 1 60); do
+    [ -z "$(get_window_option "$WIN" window-status-style)" ] && break
+    sleep 0.05
+done
 
 after_style="$(get_window_option "$WIN" "window-status-style")"
 after_state="$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")"

@@ -18,6 +18,7 @@ while IFS= read -r completed_pane; do
         reset_pane_style "$completed_pane"
     fi
 done < <(tmux list-panes -t "$window_id" -F '#{pane_id}')
+reconcile_notifications ack "$window_id"
 render_window_state "$window_id"
 sync_animation
 tmux refresh-client -S >/dev/null 2>&1 || true

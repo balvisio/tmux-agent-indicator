@@ -554,7 +554,32 @@ Tmux supports:
 
 ### Notifications
 
-State transitions trigger a `tmux display-message` notification. Enabled by default for `needs-input` and `done` states.
+Input-needed alerts sound immediately. Completion alerts sound once when all agents in the same
+window have finished or are idle. Agents in other windows do not delay the alert. Focusing a window
+acknowledges its existing completions; Ctrl+C cancels the interrupted turn without a completion alert.
+If Codex returns a queued review to the input box, it is tracked again when you submit it; discarding
+the draft does not block later completion alerts.
+
+For Kibitz pairs, update and reinstall both plugins. The indicator waits for the specific forwarded
+review, including queued reviews; `/mute` skips that wait and `/tee` tracks the review started at prompt
+submission. Pending reviews also keep the window title and menu-bar dot yellow between agents;
+input-needed magenta still takes priority. There is no fixed delay or timeout that treats unfinished
+reviews as complete. These hooks require Claude's `prompt_id` and Codex's `turn_id` fields. After
+reinstalling the indicator, run `/hooks` in Codex to trust its commands.
+
+SSH and VS Code hosts need the indicator update too. Reload Hammerspoon after updating its module.
+Remote completion sounds use the same completion event as the host, independently of temporary title
+colors. Input-needed alerts retain their existing behavior.
+
+If delivery fails, check `~/.claude/kibitz-hook.log` and the window diagnostic:
+
+```bash
+tmux show-option -wqv @agent-indicator-notification-error
+```
+
+Resolve the failed delivery or restart the Kibitz pair before starting another exchange. Failures do
+not produce a successful-completion alert. Notifications are enabled by default for `needs-input` and
+`done` states.
 
 ```tmux
 # Disable notifications entirely

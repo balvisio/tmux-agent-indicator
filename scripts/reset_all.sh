@@ -57,7 +57,12 @@ while IFS= read -r window_id; do
     reset_window_option "$window_id" "window-status-current-style" "TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_CURRENT_STYLE"
     reset_window_option "$window_id" "pane-active-border-style" "TMUX_AGENT_WINDOW_${window_id}_ORIG_ACTIVE_BORDER_STYLE"
     tmux set-window-option -qt "$window_id" @agent-indicator-state idle
+    tmux set-window-option -qut "$window_id" @agent-indicator-completion
+    tmux set-window-option -qut "$window_id" @agent-indicator-review-pending
+    tmux set-window-option -qut "$window_id" @agent-indicator-notification-error
 done < <(tmux list-windows -a -F '#{window_id}')
+
+tmux set-option -gqu @agent-indicator-notifications
 
 # Remove all TMUX_AGENT_* env vars
 while IFS= read -r line; do

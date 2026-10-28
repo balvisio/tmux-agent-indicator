@@ -304,3 +304,21 @@ installs it and runs the test as part of the suite.
 names. A plain host shell must lose stale agent labels, blue styling, SSH-host labels, and fallback
 icons. Real descendants (including wrapped agents and agents in sibling panes) must remain visible.
 This checks both the optional presence sweep and the plugin indicator.
+
+### Grouped completion notifications
+
+Run `python3 tests/test-group-notifications.py`. Set `KIBITZ_TEST_REPO` to a matching Kibitz checkout
+when it is not beside this repository; that enables the real hook integration on an isolated socket.
+The tests cover delayed delivery, queued and identical exchanges, `/mute`, `/tee`, interim and duplicate
+stops, focus acknowledgement, pane replacement, delivery failure, and interruption with queued work.
+The hook integration checks yellow across the handoff, magenta priority, and color reset on skips,
+interruptions and reviewer closure, including when notification sounds are disabled.
+`tests/test-hammerspoon-dots.py` checks remote completion event delivery and duplicate window listings.
+
+For a manual check, update both plugins and trust the indicator hooks in Codex. Submit a prompt to a
+Claude/Kibitz pair: the window and dot must stay yellow through the handoff. Claude finishing must
+stay silent while Codex reviews, and Codex finishing must produce one completion sound. Repeat with
+`/tee`, `/mute`, a queued second exchange, and Ctrl+C during review. Interruption must clear yellow
+without ringing; a queued review returned to the input box must be tracked when resubmitted, and
+discarding it must not block later completion alerts. Repeat on an updated SSH or VS Code host with
+Hammerspoon running.

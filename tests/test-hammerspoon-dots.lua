@@ -629,6 +629,36 @@ reconnected.callback(0, hostPoll, '')
 vscode, startTasks = true, false
 print('PASS: foreground probes, pending completions, timeouts, late callbacks, and host reconnection')
 
+-- Completion events are independent of transient colors and deduplicate linked sessions.
+vscode = false
+dots.pollAll()
+local function completionPoll(state, event, duplicate)
+    local row = 'W\thost\tcolossus\t@70\t70\tagents\t0\tmain\t' .. state
+        .. '\tbg=red\tSSH\t' .. (event:match('^[^:]+:%d+$') and event .. ':1' or event) .. '\n'
+    dots.applyPoll('colossus', 0, 'T\thost\tcolossus\n' .. row .. (duplicate and row or ''), '')
+end
+beforeSounds = sounds
+completionPoll('running', 'server-a:0')
+completionPoll('done', 'server-a:0')
+assert(sounds == beforeSounds, 'a temporary done color must not bypass pending review')
+completionPoll('running', 'server-a:0')
+completionPoll('done', 'server-a:1', true)
+assert(sounds == beforeSounds + 1, 'one completion event must produce one sound across linked sessions')
+completionPoll('idle', 'server-a:1')
+completionPoll('done', 'server-a:1')
+assert(sounds == beforeSounds + 1, 'focus and repeated polls must not replay a completion')
+completionPoll('done', 'server-b:1')
+assert(sounds == beforeSounds + 1, 'a restored server must establish a new baseline silently')
+completionPoll('done', 'server-b:2')
+assert(sounds == beforeSounds + 2, 'new work on the restored server must notify')
+completionPoll('done', 'server-b:3:0')
+assert(sounds == beforeSounds + 2, 'new work must suppress an old completion even during a red handoff gap')
+completionPoll('done', 'server-b:3:1')
+assert(sounds == beforeSounds + 2, 'readiness alone must not replay a suppressed event')
+completionPoll('done', 'server-b:4:1')
+assert(sounds == beforeSounds + 3, 'the later completion must still notify')
+print('PASS: remote completion decisions, delayed handoffs, linked-window deduplication, and server restarts')
+
 -- The Python harness runs these exact queries against an isolated tmux server.
 local arguments = assert(io.open(arg[2] .. '/ssh-args.txt', 'w'))
 for _, value in ipairs(first.args) do arguments:write(value, '\n') end

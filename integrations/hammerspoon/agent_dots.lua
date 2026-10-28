@@ -156,11 +156,11 @@ local REMOTE_SCRIPT = [==[
 #   jump <spec> <session> <wid> <source> select that window (spec = "host" or "<container-id>:<uid>")
 # Output of poll, tab-separated:
 #   T <spec> <name>                                                    one per tmux server found
-#   W <spec> <name> <window_id> <index> <label> <active> <session> <state> <style> <source>   one per agent window
+#   W <spec> <name> <window_id> <index> <label> <active> <session> <state> <style> <source> <completion>   one per agent window
 set -u
 cmd=${1:-poll}; a1=${2:-}; a2=${3:-}; a3=${4:-}; a4=${5:-}
 # tmux formats use | as separator: a C locale would turn tabs into "_" in tmux client output
-FMT_W='W|#{window_id}|#{window_index}|#{@agent_present}|#{@agent_label}|#{window_active}|#{session_name}|#{@agent-indicator-state}|__WINDOW_STYLE__|#{session_id}'
+FMT_W='W|#{window_id}|#{window_index}|#{@agent_present}|#{@agent_label}|#{window_active}|#{session_name}|#{@agent-indicator-state}|__WINDOW_STYLE__|#{session_id}|#{@agent-indicator-completion}'
 
 tm() { # tm <spec> <tmux args...>
     local spec=$1; shift
@@ -247,7 +247,7 @@ emit() { # emit <spec> <name>: consume the same window state used by tmux titles
                     if (style[i]=="bg=red") state="done"
                 }
             }
-            print "W", spec, name, $2, $3, $5, $6, $7, state, $9, (spec=="host" ? source[$10] : "VS")
+            print "W", spec, name, $2, $3, $5, $6, $7, state, $9, (spec=="host" ? source[$10] : "VS"), $11
         }'
 }
 
@@ -483,7 +483,7 @@ local function windowIsVisible(host, w)
     return false
 end
 
--- Parse one poll result into remote[host]; play a sound for windows that changed to needs-input / done
+-- Input alerts follow state; completion sounds follow the server's shared decision.
 -- (never on the first successful poll of a host, which only sets the baseline).
 local function applyPoll(host, code, out, err)
     local r = remote[host]
@@ -493,7 +493,7 @@ local function applyPoll(host, code, out, err)
         r.err = ("ssh exit %s %s"):format(tostring(code), (err or ""):gsub("%s+", " ")):sub(1, 100)
         return
     end
-    local windows, targets, states = {}, 0, {}
+    local windows, targets, states, completions = {}, 0, {}, {}
     for line in (out or ""):gmatch("[^\r\n]+") do
         local f = {}
         for field in (line .. "\t"):gmatch("([^\t]*)\t") do f[#f + 1] = field end
@@ -508,17 +508,28 @@ local function applyPoll(host, code, out, err)
             local key = w.spec .. "/" .. w.id
             states[key] = w.state
             local prev = r.states[key]
-            if r.ok and prev and prev ~= w.state and (w.state == "needs-input" or w.state == "done")
-                and windowIsVisible(host, w) then
-                play(w.state)
+            local completion = f[12] or ""
+            completions[key] = completion
+            local previousCompletion = (r.completions or {})[key]
+            local epoch, sequence, ready = completion:match("^([^:]+):(%d+):([01])$")
+            local previousEpoch, previousSequence = (previousCompletion or ""):match("^([^:]+):(%d+):")
+            -- Linked sessions can list the same window twice in one poll.
+            if not states["notified:" .. key] and r.ok and windowIsVisible(host, w) then
+                if prev and prev ~= w.state and w.state == "needs-input" then
+                    play("needs-input")
+                elseif ready == "1" and previousEpoch and epoch == previousEpoch
+                    and tonumber(sequence) > tonumber(previousSequence) then
+                    play("done")
+                end
             end
+            states["notified:" .. key] = true
         end
     end
     table.sort(windows, function(a, b)
         if a.where ~= b.where then return a.where < b.where end
         return a.index < b.index
     end)
-    r.windows, r.targets, r.states, r.ok, r.err = windows, targets, states, true, nil
+    r.windows, r.targets, r.states, r.completions, r.ok, r.err = windows, targets, states, completions, true, nil
 end
 
 -- One ssh poll per host at a time; the current mode rides along so the remote mode file follows ours.

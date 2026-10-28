@@ -34,3 +34,4 @@ else
     render_window_state "$1"
 fi
 sync_animation
+reconcile_notifications sweep

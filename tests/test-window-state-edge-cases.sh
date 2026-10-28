@@ -79,4 +79,8 @@ done
 pass 'pane and window respawn clear stale state without erasing sibling work'
 tmux_cmd run-shell "\"$REPO_ROOT/scripts/reset_all.sh\""
 [ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'reset did not publish idle'
-pass 'reset clears the published aggregate state'
+assert_empty "$(tmux_cmd show-option -gqv @agent-indicator-notifications)" 'reset retained notification accounting'
+assert_empty "$(get_window_option "$WIN" @agent-indicator-completion)" 'reset retained completion event'
+assert_empty "$(get_window_option "$WIN" @agent-indicator-review-pending)" 'reset retained pending review color'
+assert_empty "$(get_window_option "$WIN" @agent-indicator-notification-error)" 'reset retained delivery diagnostic'
+pass 'reset clears the published aggregate state and notification accounting'

@@ -55,6 +55,11 @@ prune_pane_states() {
 # Only live panes participate. A closed or moved pane cannot keep its old window colored.
 window_agent_state() {
     local window_id="$1" pane_id dead state result=idle
+    # A reserved review keeps the window busy across the gap between agents.
+    if [ "$(tmux show-option -wqv -t "$window_id" @agent-indicator-review-pending)" = 1 ] &&
+        is_enabled "$(tmux_get_option_or_default @agent-indicator-running-enabled on)"; then
+        result=running
+    fi
     while read -r pane_id dead; do
         [ "$dead" = 0 ] || continue
         state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")
@@ -319,3 +324,5 @@ stop_animation() {
     tmux set-environment -gu TMUX_AGENT_ANIMATION_FRAME 2>/dev/null || true
 }
 
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notification-lib.sh"

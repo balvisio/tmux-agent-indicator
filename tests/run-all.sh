@@ -23,6 +23,7 @@ tests=(
     "$ROOT_DIR/tests/test-resolve-ancestry.sh"
     "$ROOT_DIR/tests/test-cancellation-hooks.sh"
     "$ROOT_DIR/tests/test-notification-command.sh"
+    "$ROOT_DIR/tests/test-group-notifications.py"
     "$ROOT_DIR/tests/test-running-animation.sh"
     "$ROOT_DIR/tests/test-ssh-reconnect.sh"
     "$ROOT_DIR/tests/test-vpn-guard.py"

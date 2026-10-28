@@ -104,8 +104,8 @@ def main():
                 ["bash", str(fixture / "probe.sh"), "poll"], env=inside, text=True, timeout=8,
             )
             windows = [line.split("\t") for line in probe.splitlines() if line.startswith("W\t")]
-            assert len(windows) == 1 and len(windows[0]) == 11, windows
-            assert windows[0][8:] == ["running", expected_style, "SSH"], windows
+            assert len(windows) == 1 and len(windows[0]) == 12, windows
+            assert windows[0][8:] == ["running", expected_style, "SSH", ""], windows
             result = subprocess.run(harness, check=True, capture_output=True, text=True)
             for line in result.stdout.splitlines():
                 if line.startswith("PASS:"):
