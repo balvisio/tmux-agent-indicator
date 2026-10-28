@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the menu bar with mock Hammerspoon and real isolated tmux queries."""
 
+import base64
 import os
 import pty
 from pathlib import Path
@@ -149,6 +150,46 @@ def main():
             tmux("set", "-w", "-t", ssh_window, "@ssh_agent_color", "")
             assert not title().startswith("#["), "failed polls must restore the normal title"
             print("PASS: published SSH colors render in tmux and respect host/local-agent guards")
+
+            # Replay the color payload through the transmitted probe, using only this
+            # isolated server and a fake ssh -G. No connection is opened by the relay.
+            ssh_config = fixture / "effective-ssh-config"
+            fake_ssh = fixture / "ssh"
+            fake_ssh.write_text("#!/bin/sh\n[ \"$1\" = -G ] || exit 99\n"
+                                "cat " + shlex.quote(str(ssh_config)) + "\n")
+            fake_ssh.chmod(0o755)
+            tmux("set", "-w", "-t", ssh_window, "@ssh_host", "fixture-alias")
+            inside["SSH_CONNECTION"] = "192.0.2.1 40000 192.0.2.10 22"
+
+            def relay(config, colors="192.0.2.10\t22\tfixture-user\tblue\n"):
+                ssh_config.write_text(config)
+                payload = base64.b64encode(colors.encode()).decode()
+                output = subprocess.check_output(
+                    ["bash", str(fixture / "probe.sh"), "poll", "", payload],
+                    env=inside, text=True, timeout=8,
+                )
+                assert any(row.startswith("I\t192.0.2.10\t22\t") for row in output.splitlines()), output
+                agent_rows = [row.split("\t") for row in output.splitlines() if row.startswith("W\t")]
+                assert len(agent_rows) == 1 and all(row[3] != ssh_window for row in agent_rows), agent_rows
+                return tmux("show", "-wqv", "-t", ssh_window, "@ssh_agent_color")
+
+            effective = "hostname 192.0.2.10\nport 22\nuser fixture-user\n"
+            assert relay(effective) == "blue"
+            for option in ("window-status-format", "window-status-current-format"):
+                assert title(option).startswith("#[bg=blue,fg=white,noreverse]"), title(option)
+            assert relay(effective, "192.0.2.10\t22\tfixture-user\t#123abc\n") == "#123abc"
+            assert relay(effective.replace("192.0.2.10", "192.0.2.11")) == "", "an alias is not a host identity"
+            assert relay(effective.replace("fixture-user", "other-user")) == "", "accounts must match"
+            assert relay(effective.replace("port 22", "port 2222")) == "", "ports must match"
+            for routing in ("proxyjump gateway", "proxycommand helper", "bindaddress 192.0.2.5", "bindinterface vpn0"):
+                assert relay(effective) == "blue"
+                assert relay(effective + routing + "\n") == "", "routing overrides must clear stale colors"
+            assert relay(effective, "\n") == "", "an empty palette must clear stale colors"
+            assert relay(effective, "192.0.2.10\t22\tfixture-user\tblue\n192.0.2.10\t22\tfixture-user\tred\n") == "", \
+                "ambiguous endpoint colors must not be applied"
+            assert relay(effective.replace("192.0.2.10", "localhost"),
+                         "127.0.0.1\t22\tfixture-user\tblue\n::1\t22\tfixture-user\tblue\n") == "blue"
+            print("PASS: relayed SSH titles match address, port, and account without adding remote dots")
 
             # Real clients identify their source independently of the session name.
             editor_window = tmux("new-session", "-d", "-P", "-F", "#{window_id}", "-s", "project",

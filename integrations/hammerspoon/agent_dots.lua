@@ -51,6 +51,7 @@ local VSCODE = "com.microsoft.VSCode"
 local REFRESH = 2 -- seconds, local tmux + clock
 local REMOTE_REFRESH = 3 -- seconds, each VS Code host
 local REMOTE_TIMEOUT = 20 -- seconds before a hung ssh poll is killed
+local SSH_EMPTY_COLOR = "#0DBC79" -- Explicit RGB keeps empty SSH titles consistent across terminals.
 local MAX_TITLE_WIDTH = 600 -- points, also limited to 30% of the narrowest connected screen
 -- Settings a user may override from init.lua before the require line, e.g.
 --   AGENT_DOTS = { expansionHotkey = { mods = {"cmd"}, key = "F9" } }
@@ -151,10 +152,12 @@ local LABEL_COLOR = { hex = "#FFFFFF" }
 -- Probe script run on each VS Code host (see its header for the protocol). Sent inline, base64.
 local REMOTE_SCRIPT = [==[
 # agent-dots remote probe: runs on the ssh host (sent inline by agent_dots.lua, base64 over ssh).
-#   poll <on|dnd>              list agent windows of the host tmux and of every VS Code dev container
+#   poll <on|dnd> [colors]     list agent windows of the host tmux and of every VS Code dev container
 #                              (tmux found via /tmp/tmux-<uid>), and sync the Do Not Disturb mode there
+#                              colors: base64 TSV of SSH endpoint fields and their summary color
 #   jump <spec> <session> <wid> <source> select that window (spec = "host" or "<container-id>:<uid>")
 # Output of poll, tab-separated:
+#   I <address> <port> <user>                                          this SSH connection's destination
 #   T <spec> <name>                                                    one per tmux server found
 #   W <spec> <name> <window_id> <index> <label> <active> <session> <state> <style> <source> <completion>   one per agent window
 set -u
@@ -195,6 +198,79 @@ sync_mode() { # sync_mode <spec> <mode>: write "<mode> <epoch>" to ~/.local/stat
     else
         docker exec -u "${spec#*:}" "${spec%%:*}" sh -c "$snippet" sh "$mode" 2>/dev/null
     fi
+}
+
+sync_ssh_colors() { # Apply already-polled host colors without discovering more dot segments.
+    local spec=$1 colors=$2
+    local -a runner
+    if [ "$spec" = host ]; then
+        runner=(python3 - "$colors" '')
+    else
+        runner=(docker exec -i -u "${spec#*:}" "${spec%%:*}" python3 - "$colors" "/tmp/tmux-${spec#*:}/default")
+    fi
+    "${runner[@]}" 2>/dev/null <<'PYTHON'
+import base64, ipaddress, re, shlex, subprocess, sys
+
+palette = {}
+for row in base64.b64decode(sys.argv[1]).decode().splitlines():
+    parts = row.split('\t')
+    if len(parts) == 4 and re.fullmatch(r'#[0-9a-fA-F]{6}|[a-zA-Z][a-zA-Z0-9]*', parts[-1]):
+        try:
+            key = (str(ipaddress.ip_address(parts[0])), parts[1], parts[2])
+        except ValueError:
+            continue
+        palette[key] = parts[-1] if key not in palette or palette[key] == parts[-1] else ''
+tmux = ['tmux', '-u'] + (['-S', sys.argv[2]] if sys.argv[2] else [])
+def run(args):
+    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
+
+try:
+    rows = run(tmux + ['list-windows', '-a', '-F', '#{window_id}|#{@ssh_host}|#{@ssh_agent_host}|#{@ssh_agent_color}'])
+except (OSError, subprocess.SubprocessError):
+    sys.exit(0)
+resolved, addresses, seen, commands = {}, {}, set(), []
+for row in rows.splitlines():
+    wid, host, old_host, old_color = row.split('|', 3)
+    if wid in seen or not re.fullmatch(r'@\d+', wid):
+        continue
+    seen.add(wid)
+    if host and not re.fullmatch(r'[a-zA-Z0-9_.@:\[\]-]+', host):
+        continue
+    if not (host or old_host or old_color):
+        continue
+    if host and host not in resolved and palette:
+        try:
+            output = run(['ssh', '-G', '-o', 'RemoteCommand=none', '--', host])
+            options = dict(line.split(' ', 1) for line in output.splitlines() if ' ' in line)
+            # Routing overrides can make the same address refer to a different machine.
+            if any(options.get(key, 'none') != 'none'
+                   for key in ('proxyjump', 'proxycommand', 'bindaddress', 'bindinterface')):
+                raise ValueError('SSH routing override')
+            hostname = options['hostname'].strip('[]')
+            if hostname not in addresses:
+                try:
+                    addresses[hostname] = [str(ipaddress.ip_address(hostname))]
+                except ValueError:
+                    # Bound DNS resolution as well as SSH configuration evaluation.
+                    dns = run([sys.executable, '-c',
+                               'import socket,sys; print("\\n".join(sorted({r[4][0] for r in socket.getaddrinfo(sys.argv[1], None)})))',
+                               hostname])
+                    addresses[hostname] = [str(ipaddress.ip_address(address)) for address in dns.splitlines()]
+            colors = {palette.get((address, options['port'], options['user']), '')
+                      for address in addresses[hostname]}
+            resolved[host] = colors.pop() if len(colors) == 1 else ''
+        except (KeyError, ValueError, OSError, subprocess.SubprocessError):
+            resolved[host] = ''
+    color = resolved.get(host, '')
+    if (old_host, old_color) == (host, color):
+        continue
+    update = shlex.join(['set-option', '-wq', '-t', wid, '@ssh_agent_host', host])
+    update += ' ; ' + shlex.join(['set-option', '-wq', '-t', wid, '@ssh_agent_color', color])
+    # A connection may change while ssh -G runs; never publish its predecessor's color.
+    commands += [';', 'if-shell', '-F', '-t', wid, '#{==:#{@ssh_host},' + host + '}', update]
+if commands:
+    run(tmux + commands[1:])
+PYTHON
 }
 
 client_source() {
@@ -253,9 +329,12 @@ emit() { # emit <spec> <name>: consume the same window state used by tmux titles
 
 case "$cmd" in
     poll)
+        read -r _ _ address port <<< "${SSH_CONNECTION:-}"
+        [ -n "$address" ] && [ -n "$port" ] && printf 'I\t%s\t%s\t%s\n' "$address" "$port" "$(id -un)"
         while IFS=$'\t' read -r spec name; do
             printf 'T\t%s\t%s\n' "$spec" "$name"
             [ -n "$a1" ] && sync_mode "$spec" "$a1"
+            [ -n "$a2" ] && sync_ssh_colors "$spec" "$a2"
             emit "$spec" "$name"
         done < <(targets) ;;
     jump)
@@ -451,6 +530,18 @@ local function windowsForSegment(seg)
     return windows
 end
 
+local function remoteSshColors()
+    local rows = {}
+    for host, r in pairs(remote) do
+        if r.ok then
+            local top = highestPriority(windowsForSegment({kind = "SSH", host = host}))
+            if r.endpoint then rows[#rows + 1] = r.endpoint .. "\t" .. (top and top.tmuxColor or SSH_EMPTY_COLOR) end
+        end
+    end
+    -- Keep the payload nonempty so an empty palette also clears stale remote colors.
+    return hs.base64.encode(table.concat(rows, "\n") .. "\n"):gsub("%s+", "")
+end
+
 local function visibleSegments()
     local result = {}
     for _, seg in ipairs(segments) do
@@ -465,7 +556,7 @@ local function syncSshColors()
     for _, link in ipairs(sshLinks()) do
         local r = remote[link.host]
         local top = highestPriority(windowsForSegment({ kind = "SSH", host = link.host }))
-        local color = r and r.ok and (top and top.tmuxColor or "green") or ""
+        local color = r and r.ok and (top and top.tmuxColor or SSH_EMPTY_COLOR) or ""
         if link.colorHost ~= link.host or link.color ~= color then
             commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_host " .. shq(link.host)
             commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_color " .. shq(color)
@@ -494,10 +585,13 @@ local function applyPoll(host, code, out, err)
         return
     end
     local windows, targets, states, completions = {}, 0, {}, {}
+    local endpoint
     for line in (out or ""):gmatch("[^\r\n]+") do
         local f = {}
         for field in (line .. "\t"):gmatch("([^\t]*)\t") do f[#f + 1] = field end
-        if f[1] == "T" then
+        if f[1] == "I" and #f == 4 and f[2] ~= "" and f[3]:match("^%d+$") and f[4] ~= "" then
+            endpoint = table.concat(f, "\t", 2, 4)
+        elseif f[1] == "T" then
             targets = targets + 1
         elseif f[1] == "W" and #f >= 9 then
             local color, tmuxColor = styleColor(f[10])
@@ -530,6 +624,7 @@ local function applyPoll(host, code, out, err)
         return a.index < b.index
     end)
     r.windows, r.targets, r.states, r.completions, r.ok, r.err = windows, targets, states, completions, true, nil
+    r.endpoint = endpoint
 end
 
 -- One ssh poll per host at a time; the current mode rides along so the remote mode file follows ours.
@@ -550,7 +645,7 @@ local function pollRemote(host)
         local ok, e = pcall(applyPoll, host, code, out, err)
         if not ok then note("remote " .. host .. " error: " .. tostring(e)) end
         refresh()
-    end, sshArgs(host, "poll " .. mode))
+    end, sshArgs(host, "poll " .. mode .. " " .. shq(remoteSshColors())))
     if task and task:start() then
         r.task, r.started = task, os.time()
     else

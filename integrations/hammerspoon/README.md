@@ -63,8 +63,13 @@ inside a custom window label are outside this style-based integration.
 
 The same remote poll publishes `@ssh_agent_host` and `@ssh_agent_color` on every local SSH window.
 The color comes from the highest-priority agent window in the SSH group: needs-input > running > done >
-idle. VS Code sessions and devcontainers are excluded. With no SSH agents, the color is green.
+idle. VS Code sessions and devcontainers are excluded. With no SSH agents, the color is green (`#0DBC79`).
 Multiple SSH windows connected to the same host receive the same color without additional remote polls.
+
+SSH windows inside monitored hosts and devcontainers also receive these colors for destinations already
+being monitored. This does not add menu-bar dots or poll additional hosts. Matching uses the destination
+address, port, and account from each machine's SSH configuration; unknown destinations and connections
+with proxy, jump-host, or interface overrides keep their normal color.
 
 Add this format helper to `.tmux.conf`, then prepend `#{E:@ssh_agent_title_style}` to both your
 existing `window-status-format` and `window-status-current-format` values:

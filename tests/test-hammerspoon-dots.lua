@@ -4,6 +4,7 @@ local vscode = true
 local localOutput = ''
 local localCommand = nil
 local remoteScript = nil
+local colorPayload = nil
 local renders = 0
 local drawnColors = {}
 local menuColors = {}
@@ -84,7 +85,14 @@ hs = {
         end
         error('Unexpected command: '..command)
     end,
-    base64 = {encode = function(script) remoteScript=script; return '' end},
+    base64 = {encode = function(text)
+        if text:find('# agent-dots remote probe:', 1, true) then
+            remoteScript = text
+        else
+            colorPayload = text
+        end
+        return 'fixture-base64'
+    end},
     styledtext = {new = function(text, attrs)
         local colors = {}
         if (text == '●' or text == '◉') and attrs.color then
@@ -564,7 +572,7 @@ assert(#dots.sshLinks() == 2 and #dots.segments() == 2, 'color every SSH window 
 local hostPoll = 'T\thost\tcolossus\nW\tcontainer:1000\tcontainer\t@0\t0\tagent\t0\tmain\tneeds-input\tbg=magenta\n'
 dots.applyPoll('colossus', 0, hostPoll, '')
 dots.refresh()
-assert(sshOptions['@6']['@ssh_agent_color'] == 'green', 'containers must not color the SSH host')
+assert(sshOptions['@6']['@ssh_agent_color'] == '#0DBC79', 'empty SSH hosts must use a consistent green')
 for i, pair in ipairs({{'idle', 'blue'}, {'done', 'red'}, {'running', 'yellow'}, {'needs-input', '#123abc'}}) do
     -- Lower-priority windows follow the winner to catch last-event-wins behavior.
     hostPoll = hostPoll .. ('W\thost\tcolossus\t@%d\t%d\tagent\t0\tmain\t%s\tbg=%s\n'):format(i, i, pair[1], pair[2])
@@ -593,6 +601,26 @@ local colorCommand = assert(io.open(arg[2] .. '/ssh-color-command.txt', 'w'))
 colorCommand:write(sshCommand)
 colorCommand:close()
 print('PASS: SSH titles share host priority, update duplicate windows, and clear disconnected/failed polls')
+
+local identity = 'I\t192.0.2.10\t22\tfixture-user\n'
+dots.applyPoll('colossus', 0, identity .. hostPoll, '')
+dots.refresh()
+local windowsBefore, segmentsBefore, soundsBefore = #dots.remote.colossus.windows, #dots.segments(), sounds
+dots.pollAll()
+assert(colorPayload == '192.0.2.10\t22\tfixture-user\t#123abc\n',
+    'relay the host summary to its actual endpoint, excluding the container summary')
+assert(#dots.remote.colossus.windows == windowsBefore and #dots.segments() == segmentsBefore
+    and sounds == soundsBefore, 'relaying colors must not add dots, segments, or sounds')
+dots.applyPoll('colossus', 255, '', 'unreachable')
+dots.pollAll()
+assert(colorPayload == '\n', 'an unreachable host must clear its relayed color')
+dots.applyPoll('colossus', 0, hostPoll, '')
+dots.pollAll()
+assert(colorPayload == '\n', 'a successful poll without an identity must not reuse an old endpoint')
+dots.applyPoll('colossus', 0, 'I\t192.0.2.11\t2222\tnew-user\n' .. hostPoll, '')
+dots.pollAll()
+assert(colorPayload == '192.0.2.11\t2222\tnew-user\t#123abc\n', 'reconnection must replace endpoint identity')
+print('PASS: remote SSH colors reuse monitored endpoints without changing dots or starting extra probes')
 
 startTasks = true
 dots.pollAll()
