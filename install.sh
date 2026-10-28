@@ -5,6 +5,13 @@ set -euo pipefail
 
 SCRIPT_DIR=""
 TMP_SOURCE_DIR=""
+INSTALL_WARNINGS=""
+cleanup() {
+    [ -z "$TMP_SOURCE_DIR" ] || rm -rf "$TMP_SOURCE_DIR"
+    [ -z "$INSTALL_WARNINGS" ] || rm -f "$INSTALL_WARNINGS"
+    return 0
+}
+trap cleanup EXIT
 
 SCRIPT_SOURCE=""
 case "${0:-}" in
@@ -38,7 +45,6 @@ if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/agent-indicator.tmux" ]; then
     fi
 
     TMP_SOURCE_DIR="$(mktemp -d)"
-    trap 'rm -rf "$TMP_SOURCE_DIR"' EXIT
     curl -fsSL "$ARCHIVE_URL" | tar -xz -C "$TMP_SOURCE_DIR"
     SCRIPT_DIR="$(find "$TMP_SOURCE_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
 
@@ -126,6 +132,25 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "ERROR: Run this installer with Bash 4+; the current interpreter is $BASH_VERSION." >&2
+    exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: Python 3.8+ is required; install python3 and make it available on PATH." >&2
+    exit 1
+fi
+python3 - <<'PYTHON'
+import sys
+if sys.version_info < (3, 8):
+    sys.exit("ERROR: Python 3.8+ required; found " + sys.version.split()[0])
+try:
+    import fcntl, json, pathlib, ssl, urllib.request
+except ImportError:
+    sys.exit("ERROR: Python is missing required standard-library modules; install a complete Python 3 distribution.")
+PYTHON
+INSTALL_WARNINGS="$(mktemp)"
+
 # Auto-detect agents: skip integration if agent not found on system
 if [ "$INSTALL_CLAUDE" = true ] && [ "$UNINSTALL_CLAUDE" = false ]; then
     CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -136,7 +161,7 @@ if [ "$INSTALL_CLAUDE" = true ] && [ "$UNINSTALL_CLAUDE" = false ]; then
 fi
 
 if [ "$INSTALL_CODEX" = true ] && [ "$UNINSTALL_CODEX" = false ]; then
-    CODEX_DIR="${CODEX_CONFIG_DIR:-$HOME/.codex}"
+    CODEX_DIR="${CODEX_CONFIG_DIR:-${CODEX_HOME:-$HOME/.codex}}"
     if ! command -v codex >/dev/null 2>&1 && [ ! -d "$CODEX_DIR" ]; then
         INSTALL_CODEX=false
         echo "Codex not detected, skipping hooks setup"
@@ -165,6 +190,54 @@ RECONNECT_COMPLETION_ZSH="_ssh_reconnect() { local -a h; h=(\${(f)\"\$(~/.tmux/p
 HS_DIR="$HOME/.hammerspoon"
 HS_MODULE="$HS_DIR/agent_dots.lua"
 HS_REQUIRE='require("agent_dots")'
+
+startup_files=()
+if [ "$INSTALL_ALIAS" = true ]; then
+    # Every existing startup file gets the line, and so does the current shell's own file even when it
+    # does not exist yet. Zsh: ${ZDOTDIR}/.zshrc. Bash on macOS opens login shells, which read the first
+    # of .bash_profile, .bash_login, .profile that exists (only .bash_profile is created when none does);
+    # elsewhere .bashrc. A codex alias the user wrote is left alone.
+    for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
+        [ -f "$f" ] && startup_files+=("$f")
+    done
+    case "${SHELL:-}" in
+        */zsh) startup_files+=("${ZDOTDIR:-$HOME}/.zshrc") ;;
+        */bash)
+            if [ "$(uname -s)" = Darwin ]; then
+                login_file="$HOME/.bash_profile"
+                for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+                    if [ -f "$f" ]; then login_file="$f"; break; fi
+                done
+                startup_files+=("$login_file")
+            else
+                startup_files+=("$HOME/.bashrc")
+            fi ;;
+    esac
+fi
+
+SETUP_HAMMERSPOON=false
+if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ]; then
+    if [ -d "$HS_DIR" ] || [ -d /Applications/Hammerspoon.app ] || [ -d "$HOME/Applications/Hammerspoon.app" ]; then
+        SETUP_HAMMERSPOON=true
+    fi
+    if [ ! -d /Applications/Hammerspoon.app ] && [ ! -d "$HOME/Applications/Hammerspoon.app" ]; then
+        printf '%s\n' 'Hammerspoon not found in Applications. Install it (brew install --cask hammerspoon) and rerun the installer for menu-bar dots.' >> "$INSTALL_WARNINGS"
+    fi
+fi
+
+check_args=(--warnings "$INSTALL_WARNINGS")
+[ "$UNINSTALL_ALL" = false ] || check_args+=(--uninstall)
+[ "$INSTALL_TMUX_CONF" = false ] || check_args+=(--tmux-conf)
+[ "$SETUP_HAMMERSPOON" = false ] || check_args+=(--hammerspoon)
+if [ "$INSTALL_CLAUDE" = true ] || [ "$UNINSTALL_CLAUDE" = true ]; then
+    check_args+=(--claude "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
+fi
+if [ "$INSTALL_CODEX" = true ] || [ "$UNINSTALL_CODEX" = true ]; then
+    check_args+=(--codex "${CODEX_CONFIG_DIR:-${CODEX_HOME:-$HOME/.codex}}")
+fi
+[ "$INSTALL_OPENCODE" = false ] || check_args+=(--opencode "${XDG_CONFIG_HOME:-$HOME/.config}/opencode")
+for f in ${startup_files[@]+"${startup_files[@]}"}; do check_args+=(--startup-file "$f"); done
+python3 "$SCRIPT_DIR/scripts/install-checks.py" "${check_args[@]}"
 
 # Remove the tagged lines the installer added to a shared file (startup files, init.lua, .tmux.conf).
 remove_tagged_lines() {
@@ -266,29 +339,8 @@ if [ "$INSTALL_TMUX_CONF" = true ]; then
 fi
 
 if [ "$INSTALL_ALIAS" = true ]; then
-    # Every existing startup file gets the line, and so does the current shell's own file even when it
-    # does not exist yet. Zsh: ${ZDOTDIR}/.zshrc. Bash on macOS opens login shells, which read the first
-    # of .bash_profile, .bash_login, .profile that exists (only .bash_profile is created when none does);
-    # elsewhere .bashrc. A codex alias the user wrote is left alone.
-    startup_files=()
-    for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
-        [ -f "$f" ] && startup_files+=("$f")
-    done
-    case "${SHELL:-}" in
-        */zsh) startup_files+=("${ZDOTDIR:-$HOME}/.zshrc") ;;
-        */bash)
-            if [ "$(uname -s)" = Darwin ]; then
-                login_file="$HOME/.bash_profile"
-                for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
-                    if [ -f "$f" ]; then login_file="$f"; break; fi
-                done
-                startup_files+=("$login_file")
-            else
-                startup_files+=("$HOME/.bashrc")
-            fi ;;
-    esac
     seen_files=" "
-    for f in "${startup_files[@]}"; do
+    for f in ${startup_files[@]+"${startup_files[@]}"}; do
         case "$seen_files" in *" $f "*) continue ;; esac
         seen_files="$seen_files$f "
         if ! { [ -f "$f" ] && grep -qE "^[[:space:]]*alias ssh-reconnect=" "$f"; }; then
@@ -306,19 +358,15 @@ if [ "$INSTALL_ALIAS" = true ]; then
     done
 fi
 
-if [ "$INSTALL_HAMMERSPOON" = true ] && [ "$(uname -s)" = Darwin ]; then
-    if [ -d "$HS_DIR" ] || [ -d /Applications/Hammerspoon.app ] || [ -d "$HOME/Applications/Hammerspoon.app" ]; then
-        mkdir -p "$HS_DIR"
-        own_file "$HS_MODULE"
-        cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
-        touch "$HS_DIR/init.lua"
-        if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
-            put_tagged_line "$HS_DIR/init.lua" "agent_dots" "$HS_REQUIRE" "--"
-        fi
-        echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
-    else
-        echo "Hammerspoon not found: install it (brew install --cask hammerspoon) and run the installer again for the menu-bar item"
+if [ "$SETUP_HAMMERSPOON" = true ]; then
+    mkdir -p "$HS_DIR"
+    own_file "$HS_MODULE"
+    cp "$TARGET_DIR/integrations/hammerspoon/agent_dots.lua" "$HS_MODULE"
+    touch "$HS_DIR/init.lua"
+    if ! grep -qF "$HS_REQUIRE" "$HS_DIR/init.lua"; then
+        put_tagged_line "$HS_DIR/init.lua" "agent_dots" "$HS_REQUIRE" "--"
     fi
+    echo "Hammerspoon module -> $HS_MODULE (reload Hammerspoon: menu bar icon -> Reload Config)"
 fi
 
 if [ "$INSTALL_CLAUDE" = true ] || [ "$UNINSTALL_CLAUDE" = true ]; then
@@ -342,12 +390,13 @@ if [ "$INSTALL_CLAUDE" = true ] || [ "$UNINSTALL_CLAUDE" = true ]; then
             CLAUDE_MODE="install"
         fi
 
-        python3 - "$CLAUDE_SETTINGS" "$CLAUDE_TEMPLATE" "$TARGET_DIR" "$CLAUDE_MODE" <<'PY'
+        python3 - "$CLAUDE_SETTINGS" "$CLAUDE_TEMPLATE" "$TARGET_DIR" "$CLAUDE_MODE" "$SCRIPT_DIR/scripts/install-checks.py" <<'PY'
 import base64
 import json
 import pathlib
 import shlex
 import sys
+import runpy
 
 settings_path = pathlib.Path(sys.argv[1])
 template_path = pathlib.Path(sys.argv[2])
@@ -355,17 +404,9 @@ target_dir = sys.argv[3]
 mode = sys.argv[4]
 default_install_dir = "$HOME/.tmux/plugins/tmux-agent-indicator"
 
-try:
-    settings = json.loads(settings_path.read_text(encoding="utf-8"))
-except Exception:
-    settings = {}
-
-if not isinstance(settings, dict):
-    settings = {}
-
+checks = runpy.run_path(sys.argv[5])
+settings = checks["read_hooks"](settings_path)
 hooks = settings.setdefault("hooks", {})
-if not isinstance(hooks, dict):
-    hooks = {}
 
 def unwrap_statusline(command):
     try:
@@ -477,7 +518,7 @@ PY
 fi
 
 if [ "$INSTALL_CODEX" = true ] || [ "$UNINSTALL_CODEX" = true ]; then
-    CODEX_DIR="${CODEX_CONFIG_DIR:-$HOME/.codex}"
+    CODEX_DIR="${CODEX_CONFIG_DIR:-${CODEX_HOME:-$HOME/.codex}}"
     CODEX_HOOKS="$CODEX_DIR/hooks.json"
     CODEX_TEMPLATE="$TARGET_DIR/hooks/codex-hooks.json"
     CODEX_CONFIG="$CODEX_DIR/config.toml"
@@ -499,9 +540,11 @@ if [ "$INSTALL_CODEX" = true ] || [ "$UNINSTALL_CODEX" = true ]; then
             CODEX_MODE="install"
         fi
 
-        python3 - "$CODEX_HOOKS" "$CODEX_TEMPLATE" "$TARGET_DIR" "$CODEX_MODE" <<'PY'
+        python3 - "$CODEX_HOOKS" "$CODEX_TEMPLATE" "$TARGET_DIR" "$CODEX_MODE" "$CODEX_CONFIG" "$SCRIPT_DIR/scripts/install-checks.py" "$INSTALL_WARNINGS" <<'PY'
 import json
 import pathlib
+import re
+import runpy
 import sys
 
 hooks_path = pathlib.Path(sys.argv[1])
@@ -510,17 +553,9 @@ target_dir = sys.argv[3]
 mode = sys.argv[4]
 default_install_dir = "$HOME/.tmux/plugins/tmux-agent-indicator"
 
-try:
-    settings = json.loads(hooks_path.read_text(encoding="utf-8"))
-except Exception:
-    settings = {}
-
-if not isinstance(settings, dict):
-    settings = {}
-
+checks = runpy.run_path(sys.argv[6])
+settings = checks["read_hooks"](hooks_path)
 hooks = settings.setdefault("hooks", {})
-if not isinstance(hooks, dict):
-    hooks = {}
 
 def is_plugin_command(command):
     return ("scripts/agent-state.sh" in command and "--agent codex --state" in command
@@ -580,6 +615,41 @@ if mode == "install":
 settings["hooks"] = hooks
 
 hooks_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+# Check the installed hook positions: other tools may precede our hooks in each event.
+# Disabled settings and trust decisions remain owned by Codex.
+config_path = pathlib.Path(sys.argv[5])
+if mode == "install" and config_path.is_file():
+    def warn(message):
+        with pathlib.Path(sys.argv[7]).open("a", encoding="utf-8") as report:
+            print(message, file=report)
+
+    config = checks["read_codex_config"](config_path)
+    features = config.get("features", {})
+    feature_key = "hooks" if "hooks" in features else "codex_hooks"
+    if features.get(feature_key) is False:
+        warn(f"Codex hooks are disabled in {config_path} ([features].{feature_key} = false). "
+             f"Set {feature_key} = true under [features], then restart Codex for state updates.")
+
+    states = config.get("hooks", {}).get("state", {})
+    disabled = []
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            continue
+        event_key = re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower()
+        for group_index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                continue
+            for hook_index, hook in enumerate(entry["hooks"]):
+                command = hook.get("command", "") if isinstance(hook, dict) else ""
+                if not isinstance(command, str) or not is_plugin_command(command):
+                    continue
+                hook_id = f"{hooks_path.resolve()}:{event_key}:{group_index}:{hook_index}"
+                if states.get(hook_id, {}).get("enabled") is False and event not in disabled:
+                    disabled.append(event)
+    if disabled:
+        warn("Disabled tmux-agent-indicator Codex hooks: " + ", ".join(disabled) + ". "
+             "Enable them in /hooks, then restart Codex. State updates or conversation recovery may be incomplete.")
 PY
     fi
 
@@ -626,14 +696,30 @@ if [ "$UNINSTALL_ALL" = false ]; then
         # The defaults file ends by sourcing ~/.tmux/agent-indicator.local.conf, so the user's
         # customizations are reloaded intact. The whole ~/.tmux.conf is not sourced: it may hold
         # commands such as new-session that must not run twice.
-        if tmux source-file "$AGENT_CONF" 2>/dev/null; then
+        if tmux source-file "$AGENT_CONF"; then
             echo "Running tmux server reloaded"
         else
-            echo "Reload the running tmux server with: tmux source-file $AGENT_CONF"
+            printf '%s\n' "Files installed, but the running tmux server could not reload the configuration. Fix the reported error, then run: tmux source-file $AGENT_CONF" >> "$INSTALL_WARNINGS"
         fi
     fi
-    echo "Codex: start new sessions from a new shell (alias) and run /hooks once to trust the hooks."
-    command -v autossh >/dev/null 2>&1 || echo "ssh-reconnect needs autossh: brew install autossh (or your package manager)"
+    if [ "$INSTALL_CODEX" = true ]; then
+        echo "Codex: start new sessions from a new shell (alias) and run /hooks to enable and trust the hooks."
+    fi
+    if [ "$SETUP_HAMMERSPOON" = true ]; then
+        echo "Hammerspoon: grant Accessibility, enable Launch at login, and Reload Config from its menu."
+    fi
+    if [ -s "$INSTALL_WARNINGS" ]; then
+        echo "Installation completed with warnings:" >&2
+        while IFS= read -r warning; do
+            if [ -t 2 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR+x}" ]; then
+                printf '\033[33mWARNING: %s\033[0m\n' "$warning" >&2
+            else
+                printf 'WARNING: %s\n' "$warning" >&2
+            fi
+        done < "$INSTALL_WARNINGS"
+    else
+        echo "Installation checks passed."
+    fi
 fi
 
 if [ "$UNINSTALL_CLAUDE" = true ]; then
@@ -641,7 +727,7 @@ if [ "$UNINSTALL_CLAUDE" = true ]; then
 fi
 
 if [ "$UNINSTALL_CODEX" = true ]; then
-    echo "Removed tmux-agent-indicator Codex hooks from: ${CODEX_CONFIG_DIR:-$HOME/.codex}/hooks.json"
+    echo "Removed tmux-agent-indicator Codex hooks from: ${CODEX_CONFIG_DIR:-${CODEX_HOME:-$HOME/.codex}}/hooks.json"
 fi
 
 if [ "$UNINSTALL_OPENCODE" = true ]; then

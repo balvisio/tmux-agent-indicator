@@ -5,7 +5,8 @@ and Codex sessions running in your panes: running, needs input, done, idle.
 
 ## Requirements
 
-- tmux 3.6+, bash 4+, Python 3, autossh (`brew install autossh`) for `ssh-reconnect`
+- tmux 3.6+, bash 4+, Python 3.8+ (Python 3.8–3.10 also needs `tomli` to validate existing Codex TOML configuration)
+- autossh (`brew install autossh`) for `ssh-reconnect`
 - Claude Code and/or Codex on the machine
 - macOS extras: Hammerspoon (`brew install --cask hammerspoon`) for the menu-bar item
 
@@ -28,11 +29,24 @@ Or from a checkout: `./install.sh`. The installer
 A file of yours that the installer replaces is kept next to it as a dated `.bak` copy.
 Options: `--no-tmux-conf`, `--no-alias`, `--no-hammerspoon`, `--no-claude`, `--no-codex`, `--no-opencode`, `--uninstall`.
 
+The installer checks tool versions, destination permissions, and existing Claude/Codex configuration
+before changing installed files or settings. Fix any reported errors and rerun it. Checks for skipped
+integrations are skipped too. `CODEX_HOME` is supported; `CODEX_CONFIG_DIR` takes precedence when set.
+
+Yellow warnings at the end identify disabled hooks, unavailable Codex `--no-daemon` support, missing
+optional tools, or a failed reload of the running tmux configuration. They explain which feature needs
+attention and what to do next. No running tmux server is required to install.
+
 ## Finish
 
 1. Open a new shell (picks up the alias).
-2. Codex: run `/hooks` once and trust the tmux-agent-indicator hooks. Repeat after an update that changes a hook.
+2. Codex: run `/hooks` once and enable and trust the tmux-agent-indicator hooks. Repeat after an update that changes a hook.
 3. Hammerspoon: grant Accessibility on first launch, enable *Launch at login*, then menu-bar icon → **Reload Config**.
+
+For disabled Codex indicator hooks, enable the named hooks in `/hooks` and restart Codex. If hooks are
+disabled globally, enable `hooks = true` under `[features]` in Codex's `config.toml` first. For Claude,
+remove `disableAllHooks: true` from its settings or set it to `false`. The installer checks user
+configuration; project settings and administrative policies can also affect whether hooks run.
 
 ## Verify
 

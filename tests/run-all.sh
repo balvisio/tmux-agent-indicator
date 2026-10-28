@@ -28,6 +28,8 @@ tests=(
     "$ROOT_DIR/tests/test-ssh-reconnect.sh"
     "$ROOT_DIR/tests/test-vpn-guard.py"
     "$ROOT_DIR/tests/test-install-startup-lines.sh"
+    "$ROOT_DIR/tests/test-install-hook-warnings.py"
+    "$ROOT_DIR/tests/test-install-checks.py"
     "$ROOT_DIR/tests/test-ssh-passthrough.sh"
     "$ROOT_DIR/tests/test-ssh-mouse.py"
     "$ROOT_DIR/tests/test-agent-recovery.py"

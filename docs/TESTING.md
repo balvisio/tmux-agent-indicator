@@ -42,10 +42,17 @@ Run individual checks:
 ./tests/test-ssh-reconnect.sh
 ./tests/test-vpn-guard.py
 ./tests/test-install-startup-lines.sh
+./tests/test-install-hook-warnings.py
+./tests/test-install-checks.py
 ./tests/test-ssh-passthrough.sh
 ./tests/test-ssh-mouse.py
 ./tests/test-agent-recovery.py
 ```
+
+The installer checks use temporary homes and fake tool executables. They verify that missing tools,
+unsupported versions, malformed agent settings, and unwritable destinations leave existing files
+unchanged. They also check disabled-hook warnings, terminal colors, skipped integrations, optional
+dependencies, and reload failures without contacting the live tmux server.
 
 The recovery test restores two Kibitz pairs with new pane IDs, including a reviewer started before
 its host. It checks that each reviewer keeps its role and links to its own host conversation.
