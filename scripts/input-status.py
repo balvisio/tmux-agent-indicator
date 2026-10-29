@@ -109,9 +109,10 @@ def status(question, pane, info, tmux):
             text = subprocess.check_output(["tmux", "capture-pane", "-p", "-t", pane],
                                            text=True, stderr=subprocess.DEVNULL, timeout=2)
             result = codex_screen(text, int(meta[2]), meta[3] == "1")
-            # Hooks run before the dialog is drawn. A normal composer is only
-            # evidence of acceptance after this request's dialog was observed.
-            if result == "answered" and not question.get("seen_waiting"):
+            # Before the grace expires, the working composer may precede the
+            # dialog. At the deadline it also covers answers between samples.
+            if (result == "answered" and not question.get("seen_waiting")
+                    and time.monotonic() < question["deadline"]):
                 return "unknown"
             return result
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
@@ -211,10 +212,12 @@ def watch(pane, question):
                         "#{pane_pid}|#{pane_dead}|#{@agent-indicator-input-pending}")
         if identity != f'{question["pid"]}|0|{question["token"]}':
             return
+        # Decide whether this is the final probe before reading the screen. If
+        # the read crosses the deadline, take another sample before alerting.
+        remaining = question["deadline"] - time.monotonic()
         result = status(question, pane, {"pid": question["pid"]}, tmux)
         if result == "waiting":
             question["seen_waiting"] = True
-        remaining = question["deadline"] - time.monotonic()
         if result == "answered" or remaining <= 0:
             # The writer validates the token and process again: a hook can cancel
             # or replace the question between observing it and acquiring the lock.

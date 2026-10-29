@@ -579,11 +579,11 @@ for the approved tool to finish. Set the delay in
 set -g @agent-indicator-input-delay '3'
 ```
 
-Set it to `0` for immediate input alerts. Claude uses its live session status. Codex uses the visible
-terminal dialog followed by the working composer. A dialog missed between checks, copy mode, or an
-unrecognized screen cannot confirm an answer. Missing or stale status also cannot confirm an answer,
-so these cases still alert after the delay. Quickly answered manual questions are silent too. Explicit `agent-state.sh` commands
-without a permission hook apply immediately.
+Set it to `0` for immediate input alerts. Claude uses its live session status. Codex recognizes the
+working composer after a visible dialog closes, or at the end of the delay if the dialog disappeared
+between checks. Copy mode, an unrecognized screen, or missing or stale status cannot confirm an
+answer, so these cases still alert after the delay. Quickly answered manual questions are silent too.
+Explicit `agent-state.sh` commands without a permission hook apply immediately.
 
 Completion alerts sound once when all agents in the same
 window have finished or are idle. Agents in other windows do not delay the alert. Focusing a window

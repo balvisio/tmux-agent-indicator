@@ -53,7 +53,9 @@ Run individual checks:
 The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
 process inside the test pane. They verify early and late answers, stale status, parallel tools,
 duplicate questions, interruption, timer replacement, and yellow/magenta styles and bell counts.
-Codex dialog and composer fixtures check conservative recognition. Process inspection must be
+Codex fixtures render dialogs and the working composer in isolated tmux panes. They check that a
+missed dialog stays yellow and silent, while an unanswered dialog alerts once after the grace.
+Recognition checks include a screen read crossing the deadline. Process inspection must be
 allowed inside the test panes. No personal startup files, agent settings, or running sessions change.
 The short-lived reader observes questions outside the writer lock. Checks cover stale reader results,
 reader failure, no periodic state writes while a question is open, and batched option reads preserving

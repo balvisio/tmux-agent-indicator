@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -155,6 +156,46 @@ class QuestionsTest(unittest.TestCase):
         self.assertEqual(status.codex_screen("› 1. Yes, proceed\n", 0, True), "unknown")
         self.assertEqual(status.codex_screen("› Type your answer\nunknown dialog\n", 0, True), "unknown")
 
+    def test_unseen_codex_dialog_keeps_grace_but_accepts_working_at_deadline(self):
+        question = dict(agent="codex", deadline=13, seen_waiting=False)
+        normal = "\nWorking (34s • esc to interrupt)\n\n› Ask Codex to do anything\n"
+        with patch.object(status.subprocess, "check_output", return_value=normal):
+            for now, expected in [(10, "unknown"), (12.99, "unknown"), (13, "answered"), (18, "answered")]:
+                with self.subTest(now=now), patch.object(status.time, "monotonic", return_value=now):
+                    self.assertEqual(status.status(question, "%1", {"pid": "42"},
+                                                   lambda *args: "codex|0|3|1|42|tty"), expected)
+            question["seen_waiting"] = True
+            with patch.object(status.time, "monotonic", return_value=11):
+                self.assertEqual(status.status(question, "%1", {"pid": "42"},
+                                               lambda *args: "codex|0|3|1|42|tty"), "answered")
+
+    def test_codex_unanswered_or_unreadable_screen_does_not_clear_at_deadline(self):
+        question = dict(agent="codex", deadline=13, seen_waiting=False)
+        cases = [("codex|0|0|0|42|tty", "Press enter to confirm or esc to cancel\n", "waiting"),
+                 ("codex|0|0|1|42|tty", "Unknown dialog\n", "unknown"),
+                 ("codex|1|3|1|42|tty", "Working (3s • esc to interrupt)\n", "unknown")]
+        with patch.object(status.time, "monotonic", return_value=14):
+            for meta, screen, expected in cases:
+                with self.subTest(meta=meta), patch.object(status.subprocess, "check_output", return_value=screen):
+                    self.assertEqual(status.status(question, "%1", {"pid": "42"},
+                                                   lambda *args: meta), expected)
+
+    def test_reader_rechecks_when_unseen_dialog_probe_crosses_deadline(self):
+        question = dict(agent="codex", pid="42", token="one", deadline=3, seen_waiting=False)
+        normal = "\nWorking (34s • esc to interrupt)\n\n› Ask Codex to do anything\n"
+        def tmux(*args):
+            return "42|0|one" if "input-pending" in args[-1] else "codex|0|3|1|42|tty"
+        with patch.object(status, "tmux", side_effect=tmux), \
+                patch.object(status.subprocess, "check_output", return_value=normal), \
+                patch.object(status.time, "monotonic", side_effect=[2.99, 2.999, 3.001, 3.001]), \
+                patch.object(status.time, "sleep") as sleep, \
+                patch.object(status.subprocess, "run") as run:
+            status.watch("%1", question)
+        sleep.assert_called_once()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][-6:],
+                         ["--input-result", "%1", "one", "42", "answered", "0"])
+
     def test_claude_status_requires_current_session_and_process(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory) / "sessions"
@@ -202,6 +243,38 @@ while True:
     time.sleep(.02)
 '''
 
+FAKE_CODEX = r'''
+set -euo pipefail
+root="$1"
+state_script="$2"
+stty -echo
+hook() {
+    printf '{"session_id":"codex-one","turn_id":"turn","hook_event_name":"%s"}' "$2" |
+        "$state_script" --hook --agent codex --state "$1"
+}
+paint() {
+    case "$(cat "$root/codex-screen")" in
+        working)
+            printf '\033[2J\033[H\033[?25h\033[20;1HWorking (34s • esc to interrupt)\033[22;1H› Ask Codex to do anything\033[24;1Hmodel · directory\033[22;3H'
+            ;;
+        waiting)
+            printf '\033[2J\033[H\033[?25l\033[20;1HWould you like to run the following command?\033[22;1H› 1. Yes, proceed (y)\033[24;1HPress enter to confirm or esc to cancel'
+            ;;
+    esac
+}
+hook running UserPromptSubmit
+paint
+printf ready > "$root/codex-ack"
+while IFS= read -r command; do
+    case "$command" in
+        question) hook needs-input PermissionRequest ;;
+        post) hook running PostToolUse ;;
+    esac
+    paint
+    printf '%s' "$command" > "$root/codex-ack"
+done
+'''
+
 
 class TmuxTest(unittest.TestCase):
     def setUp(self):
@@ -219,7 +292,7 @@ class TmuxTest(unittest.TestCase):
         (self.root / "agent.py").write_text(FAKE_AGENT)
         (self.root / "one").write_text("busy")
         command = shlex.join(["python3", str(self.root / "agent.py"), str(self.root), "one"])
-        self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "test", command)
+        self.tmux("-u", "-f", "/dev/null", "new-session", "-d", "-s", "test", command)
         self.env["TMUX"] = self.tmux("display-message", "-p", "#{socket_path},#{pid},0")
         self.pane = self.tmux("display-message", "-p", "#{pane_id}")
         self.window = self.tmux("display-message", "-p", "#{window_id}")
@@ -268,6 +341,55 @@ class TmuxTest(unittest.TestCase):
     def sweep(self):
         subprocess.run([str(ROOT / "scripts/window-state.sh"), "--notifications"],
                        env=self.env, capture_output=True, check=True, timeout=15)
+
+    def codex_fixture(self):
+        binary = self.root / "codex"
+        shutil.copy2(shutil.which("bash"), binary)
+        driver = self.root / "codex.sh"
+        driver.write_text(FAKE_CODEX)
+        (self.root / "codex-screen").write_text("working")
+        command = shlex.join([str(binary), "--noprofile", "--norc", str(driver), str(self.root),
+                              str(ROOT / "scripts/agent-state.sh")])
+        self.pane, self.window = self.tmux("new-window", "-d", "-P", "-F", "#{pane_id}|#{window_id}",
+                                           "-n", "codex-test", command).split("|")
+        self.tmux("resize-window", "-t", self.window, "-x", "80", "-y", "24")
+        self.wait(lambda: (self.root / "codex-ack").exists())
+        self.assertEqual(self.tmux("display-message", "-p", "-t", self.pane, "#{pane_current_command}"), "codex")
+
+    def codex_action(self, command, screen=None):
+        if screen:
+            (self.root / "codex-screen").write_text(screen)
+        ack = self.root / "codex-ack"
+        ack.unlink(missing_ok=True)
+        self.tmux("send-keys", "-t", self.pane, command, "Enter")
+        self.wait(lambda: ack.exists() and ack.read_text() == command)
+
+    def test_codex_dialog_missed_between_samples_stays_yellow_and_silent(self):
+        self.codex_fixture()
+        self.codex_action("question")
+        self.codex_action("post")
+        question = json.loads(self.tmux("show-option", "-gqv", "@agent-indicator-notifications"))["questions"][self.pane]
+        self.assertFalse(question["seen_waiting"])
+        self.assertFalse(question["shown"])
+        self.assertEqual(self.state(), "running")
+        self.wait(lambda: not self.tmux("show-option", "-pqv", "-t", self.pane,
+                                       "@agent-indicator-input-pending"))
+        time.sleep(.5)
+        self.assertEqual(self.state(), "running")
+        self.assertIn("bg=yellow", self.tmux("show-option", "-wv", "-t", self.window, "window-status-style"))
+        self.assertFalse(self.bells())
+
+    def test_codex_visible_question_rings_once_then_resumes(self):
+        self.codex_fixture()
+        self.codex_action("question", "waiting")
+        self.wait(lambda: self.bells() == ["needs-input"])
+        self.assertEqual(self.state(), "needs-input")
+        self.assertIn("bg=magenta", self.tmux("show-option", "-wv", "-t", self.window, "window-status-style"))
+        self.codex_action("paint", "working")
+        time.sleep(5)
+        self.sweep()
+        self.assertEqual(self.state(), "running")
+        self.assertEqual(self.bells(), ["needs-input"])
 
     def test_fast_accept_stays_yellow_without_tool_completion(self):
         self.native("waiting")
