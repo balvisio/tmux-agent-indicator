@@ -478,6 +478,7 @@ set -g @agent-indicator-notification-format '[#{agent_name}] #{agent_state} (#{s
 set -g @agent-indicator-notification-duration '5000'
 set -g @agent-indicator-notification-message 'on'
 set -g @agent-indicator-notification-command ''
+set -g @agent-indicator-input-delay '3'
 
 # Session dots (visual session indicator in status bar)
 set -g @agent-indicator-session-dots-active '●'
@@ -568,7 +569,23 @@ Tmux supports:
 
 ### Notifications
 
-Input-needed alerts sound immediately. Completion alerts sound once when all agents in the same
+Permission questions keep the pane yellow and silent for three seconds. If the question is answered
+during that time, it stays yellow; otherwise it turns magenta and rings once. An answer after magenta
+appears restores yellow on a subsequent status sweep (normally about five seconds), without waiting
+for the approved tool to finish. Set the delay in
+`~/.tmux/agent-indicator.local.conf`:
+
+```tmux
+set -g @agent-indicator-input-delay '3'
+```
+
+Set it to `0` for immediate input alerts. Claude uses its live session status. Codex uses the visible
+terminal dialog followed by the working composer. A dialog missed between checks, copy mode, or an
+unrecognized screen cannot confirm an answer. Missing or stale status also cannot confirm an answer,
+so these cases still alert after the delay. Quickly answered manual questions are silent too. Explicit `agent-state.sh` commands
+without a permission hook apply immediately.
+
+Completion alerts sound once when all agents in the same
 window have finished or are idle. Agents in other windows do not delay the alert. Focusing a window
 acknowledges its existing completions; Ctrl+C cancels the interrupted turn without a completion alert.
 If Codex returns a queued review to the input box, it is tracked again when you submit it; discarding
@@ -583,7 +600,8 @@ reinstalling the indicator, run `/hooks` in Codex to trust its commands.
 
 SSH and VS Code hosts need the indicator update too. Reload Hammerspoon after updating its module.
 Remote completion sounds use the same completion event as the host, independently of temporary title
-colors. Input-needed alerts retain their existing behavior.
+colors. Remote dots and input-needed sounds follow the host's delayed state; update the plugin on
+each host to use the same delay.
 
 If delivery fails, check `~/.claude/kibitz-hook.log` and the window diagnostic:
 

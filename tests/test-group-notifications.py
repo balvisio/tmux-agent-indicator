@@ -7,10 +7,12 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('notification_state', ROOT / 'scripts/notification-state.py')
 module = importlib.util.module_from_spec(spec)
@@ -278,6 +280,7 @@ class HookIntegrationTest(unittest.TestCase):
                 tmux('set', '-p', '-t', reviewer, '@kibitz_host_pane', host)
                 log = tmp/'bells'
                 tmux('set', '-g', '@agent-indicator-notification-message', 'off')
+                tmux('set', '-g', '@agent-indicator-input-delay', '0')
                 tmux('set', '-g', '@agent-indicator-notification-command',
                      'printf "%s\\n" "$AGENT_STATE" >> '+shlex.quote(str(log)))
                 tmux('set', '-g', '@agent-indicator-style-active-window', 'on')

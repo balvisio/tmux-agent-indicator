@@ -130,8 +130,7 @@ window_ssh_host() {
 
 # Delegate idle styling and reconciliation to the plugin's serialized window renderer.
 paint() {
-    local plugin_dir="${TMUX_AGENT_INDICATOR_DIR:-$HOME/.tmux/plugins/tmux-agent-indicator}"
-    "$plugin_dir/scripts/window-state.sh" --idle-style "$1" "$2"
+    "$script_dir/window-state.sh" --style-only --idle-style "$1" "$2"
 }
 
 sweep() {
@@ -163,6 +162,7 @@ sweep() {
             changed=1
         fi
     done < <(tmux list-windows -a -F '#{window_id}|#{@agent_present}|#{@ssh_host}')
+    "$script_dir/window-state.sh" --notifications
     # Recheck the owning pane under the writer lock, after pruning stale reconnect markers.
     while read -r session_id owner; do
         [ -n "$owner" ] || continue

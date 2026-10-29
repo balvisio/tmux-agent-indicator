@@ -116,6 +116,7 @@ if [ "$hook" = true ] && [ "$locked" = false ] && [ ! -t 0 ]; then
 fi
 
 if [ "$locked" = true ]; then
+    load_state_snapshot
     prune_pane_states
     pane_id="$TMUX_AGENT_EVENT_PANE"
 else
@@ -139,10 +140,12 @@ pane_exists "$pane_id" || exit 0
 [ "$(tmux display-message -p -t "$pane_id" '#{pane_pid}:#{pane_dead}')" = "$TMUX_AGENT_EVENT_PANE_PID:0" ] || exit 0
 if [ -n "$if_state" ]; then
     current_state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")
-    [ "${current_state:-off}" = "$if_state" ] || exit 0
+    if [ "${current_state:-off}" != "$if_state" ]; then
+        # PostToolUse must also reach a question whose alert is still delayed.
+        [ "$if_state" = needs-input ] && [ "$current_state" = running ] &&
+            [ -n "$(tmux show-option -pqv -t "$pane_id" @agent-indicator-input-pending)" ] || exit 0
+    fi
 fi
-window_id=$(tmux display-message -p -t "$pane_id" '#{window_id}')
-active_pane_id=$(tmux display-message -p '#{pane_id}')
 pane_session=$(tmux display-message -p -t "$pane_id" '#{session_name}' 2>/dev/null || true)
 if [ -n "$pane_session" ]; then
     tmux_unset_env "TMUX_AGENT_SESSION_SEEN_${pane_session}"
@@ -156,31 +159,10 @@ fi
 if ! reconcile_notifications state "$pane_id" "$agent" "$state"; then
     exit 0
 fi
-clear_pane_state "$pane_id"
-if [ "$state" != off ]; then
-    tmux_set_env "TMUX_AGENT_PANE_${pane_id}_STATE" "$state"
-    tmux_set_env "TMUX_AGENT_PANE_${pane_id}_AGENT" "$agent"
-    tmux_set_env "TMUX_AGENT_PANE_${pane_id}_PID" "$TMUX_AGENT_EVENT_PANE_PID"
-    tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
-    state_bg=$(tmux_get_option_or_default "@agent-indicator-${state}-bg" "$(default_state_bg "$state")")
-    if ! is_enabled "$(tmux_get_option_or_default @agent-indicator-background-enabled on)"; then
-        reset_pane_style "$pane_id"
-    elif [ "$state_bg" = default ]; then
-        reset_pane_style "$pane_id"
-    elif [ -n "$state_bg" ] && [ "$pane_id" != "$active_pane_id" ]; then
-        apply_pane_style "$pane_id" "$state_bg"
-    fi
-    if [ "$state" = done ] && ! is_enabled "$(tmux_get_option_or_default @agent-indicator-reset-on-focus on)"; then
-        clear_pane_state "$pane_id"
-        reset_pane_style "$pane_id"
-    fi
-else
-    reset_pane_style "$pane_id"
-fi
-render_window_state "$window_id"
+apply_agent_state "$pane_id" "$agent" "$state" "$TMUX_AGENT_EVENT_PANE_PID" || exit 0
 sync_animation
 unlock_agent_state
-if [ "$state" != off ] && [ "$state" != done ]; then
+if [ "$state" != off ] && [ "$state" != done ] && [ "$notification_silent" = false ]; then
     notify_state_change "$agent" "$state" "$pane_id"
 fi
 tmux refresh-client -S >/dev/null 2>&1 || true

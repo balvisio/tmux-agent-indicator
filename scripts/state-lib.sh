@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 # Shared state and styling helpers. Source this file; acquire the lock before mutations.
 
+declare -A agent_options agent_environment
+agent_snapshot_loaded=false
+
+# One snapshot per writer; environment writes below keep the local copy current.
+load_state_snapshot() {
+    local script_dir name value line
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    agent_options=()
+    agent_environment=()
+    agent_snapshot_loaded=false
+    while IFS= read -r -d '' name && IFS= read -r -d '' value; do
+        if [ "$name" = __SNAPSHOT_OK__ ]; then
+            agent_snapshot_loaded=true
+            continue
+        fi
+        agent_options["$name"]="$value"
+    done < <(python3 "$script_dir/notification-state.py" options)
+    while IFS= read -r line; do
+        case "$line" in
+            TMUX_AGENT_*=*) agent_environment["${line%%=*}"]="${line#*=}" ;;
+        esac
+    done < <(tmux show-environment -g)
+}
+
 # Call at the entrypoint with its original arguments, then shift the private marker.
 # The Python launcher acquires a process-owned record lock and execs this shell.
 lock_agent_state() {
@@ -9,6 +33,7 @@ lock_agent_state() {
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         exec python3 "$script_dir/state-lock.py" "$0" "$@"
     fi
+    load_state_snapshot
     prune_pane_states
 }
 
@@ -118,6 +143,10 @@ sync_animation() {
 
 tmux_option_is_set() {
     local option="$1"
+    if [ "$agent_snapshot_loaded" = true ]; then
+        [ "${agent_options[$option]+set}" = set ]
+        return
+    fi
     local raw
     raw=$(tmux show-option -gq "$option" 2>/dev/null || true)
     [ -n "$raw" ]
@@ -128,6 +157,10 @@ tmux_get_option_or_default() {
     local default_value="$2"
     local value
 
+    if [ "$agent_snapshot_loaded" = true ]; then
+        printf '%s\n' "${agent_options[$option]-$default_value}"
+        return
+    fi
     if tmux_option_is_set "$option"; then
         value=$(tmux show-option -gqv "$option")
         printf '%s\n' "$value"
@@ -138,15 +171,21 @@ tmux_get_option_or_default() {
 
 tmux_get_env() {
     local key="$1"
+    if [ "$agent_snapshot_loaded" = true ]; then
+        printf '%s\n' "${agent_environment[$key]-}"
+        return
+    fi
     tmux show-environment -g "$key" 2>/dev/null | sed 's/^[^=]*=//' || true
 }
 
 tmux_set_env() {
     tmux set-environment -g "$1" "$2"
+    agent_environment["$1"]="$2"
 }
 
 tmux_unset_env() {
     tmux set-environment -gu "$1" 2>/dev/null || true
+    unset 'agent_environment[$1]'
 }
 
 is_enabled() {
@@ -287,6 +326,38 @@ apply_pane_style() {
     tmux set-option -p -t "$pane_id" window-style "bg=$bg"
 }
 
+# Publish a pane state and its aggregate window style under the writer lock.
+apply_agent_state() {
+    local pane_id="$1" agent="$2" state="$3" pane_pid="$4"
+    local window_id active_pane_id state_bg
+    pane_exists "$pane_id" || return 1
+    [ "$(tmux display-message -p -t "$pane_id" '#{pane_pid}:#{pane_dead}')" = "$pane_pid:0" ] || return 1
+    window_id=$(tmux display-message -p -t "$pane_id" '#{window_id}')
+    active_pane_id=$(tmux display-message -p '#{pane_id}')
+    clear_pane_state "$pane_id"
+    if [ "$state" != off ]; then
+        tmux_set_env "TMUX_AGENT_PANE_${pane_id}_STATE" "$state"
+        tmux_set_env "TMUX_AGENT_PANE_${pane_id}_AGENT" "$agent"
+        tmux_set_env "TMUX_AGENT_PANE_${pane_id}_PID" "$pane_pid"
+        tmux_set_env "TMUX_AGENT_ACTIVE_PANE_${agent}" "$pane_id"
+        state_bg=$(tmux_get_option_or_default "@agent-indicator-${state}-bg" "$(default_state_bg "$state")")
+        if ! is_enabled "$(tmux_get_option_or_default @agent-indicator-background-enabled on)"; then
+            reset_pane_style "$pane_id"
+        elif [ "$state_bg" = default ]; then
+            reset_pane_style "$pane_id"
+        elif [ -n "$state_bg" ] && [ "$pane_id" != "$active_pane_id" ]; then
+            apply_pane_style "$pane_id" "$state_bg"
+        fi
+        if [ "$state" = done ] && ! is_enabled "$(tmux_get_option_or_default @agent-indicator-reset-on-focus on)"; then
+            clear_pane_state "$pane_id"
+            reset_pane_style "$pane_id"
+        fi
+    else
+        reset_pane_style "$pane_id"
+    fi
+    render_window_state "$window_id"
+}
+
 pane_exists() {
     local pane_id="$1"
     [ -n "$pane_id" ] || return 1
@@ -320,8 +391,8 @@ stop_animation() {
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         kill "$pid" 2>/dev/null || true
     fi
-    tmux set-environment -gu TMUX_AGENT_ANIMATION_PID 2>/dev/null || true
-    tmux set-environment -gu TMUX_AGENT_ANIMATION_FRAME 2>/dev/null || true
+    tmux_unset_env TMUX_AGENT_ANIMATION_PID
+    tmux_unset_env TMUX_AGENT_ANIMATION_FRAME
 }
 
 

@@ -30,8 +30,9 @@ def main():
                                       "#{pane_id}|#{pane_pid}|#{window_id}", "-s", "test",
                                       "/bin/bash --noprofile --norc").split("|")
             path, pid = tmux("display-message", "-p", "#{socket_path}|#{pid}").rsplit("|", 1)
+            # A caller may retain an old install path; use this script's own helpers.
             inside = dict(environment, TMUX=f"{path},{pid},0", TMUX_PANE=pane,
-                          TMUX_AGENT_INDICATOR_DIR=str(ROOT), AGENT_TEST_PS_FILE=str(snapshot),
+                          TMUX_AGENT_INDICATOR_DIR=str(fixture / "missing-install"), AGENT_TEST_PS_FILE=str(snapshot),
                           PATH=directory + os.pathsep + environment["PATH"])
 
             def run(script, *args):

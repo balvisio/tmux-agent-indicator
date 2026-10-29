@@ -6,13 +6,20 @@ A review reservation survives delivery and is released by its matching turn.
 """
 from collections import Counter
 import hashlib
+import importlib.util
 import json
+import math
 import os
+from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import uuid
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("input_status", Path(__file__).with_name("input-status.py"))
+input_status = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(input_status)
 
 OPTION = "@agent-indicator-notifications"
 TERMINAL = {"completed", "skipped", "cancelled", "paused"}
@@ -28,7 +35,9 @@ def message_hash(text):
 
 def hook_data(payload):
     result = {key: payload.get(key, "") for key in
-              ("session_id", "prompt_id", "turn_id", "hook_event_name")}
+              ("session_id", "prompt_id", "turn_id", "hook_event_name", "tool_use_id", "call_id")}
+    result["received_at"] = input_status.time.time()
+    result["claude_config_dir"] = os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
     prompt = payload.get("prompt") or ""
     intervals = {(0, len(prompt))} if prompt else set()
     # Codex may process several queued messages in one turn. Match each complete
@@ -44,9 +53,10 @@ def hook_data(payload):
 
 
 class Notifications:
-    def __init__(self, data, live):
+    def __init__(self, data, live, questions=None):
         self.data = data
         self.live = live
+        self.questions = questions
         data.setdefault("epoch", uuid.uuid4().hex)
         self.panes = data.setdefault("panes", {})
         self.reviews = data.setdefault("reviews", {})
@@ -149,6 +159,10 @@ class Notifications:
         # A delayed completion from a prior turn cannot mark a newer turn ready.
         if turn and current["turn"] and turn != current["turn"] and event != "SessionEnd":
             return False
+        if self.questions:
+            state = self.questions.transition(pane, agent, state, payload)
+            if state is None:
+                return False
         if state == "done":
             if not current.get("observed") or current["state"] != "done" or (turn and current["last_done"] != turn):
                 self.windows[self.live[pane]["window"]]["pending"][pane] = agent
@@ -229,7 +243,28 @@ def tmux(*args):
     return subprocess.check_output(["tmux", *args], text=True, timeout=5).strip()
 
 
+def option_snapshot():
+    """Read raw option values in one batch, preserving quotes and empty values."""
+    names = [line.split(" ", 1)[0] for line in tmux("show-options", "-g").splitlines()
+             if line.startswith("@agent-indicator-")]
+    if not names:
+        return {}
+    marker = "agent-options-" + uuid.uuid4().hex
+    commands = []
+    for name in names:
+        if commands:
+            commands.append(";")
+        commands.extend(["show-options", "-gqv", name, ";", "display-message", "-p", marker])
+    raw = subprocess.check_output(["tmux", *commands], text=True, timeout=5)
+    return dict(zip(names, (value[:-1] for value in raw.split(marker + "\n")[:-1])))
+
+
 def main():
+    if sys.argv[1] == "options":
+        for name, value in option_snapshot().items():
+            sys.stdout.write(name + "\0" + value + "\0")
+        sys.stdout.write("__SNAPSHOT_OK__\0\0")
+        return
     if sys.argv[1] == "hook-data":
         print(json.dumps(hook_data(json.load(sys.stdin)), separators=(",", ":")))
         return
@@ -243,20 +278,41 @@ def main():
         if dead == "0":
             live[pane] = dict(pid=pid, window=window, host=host,
                               state=env.get(f"TMUX_AGENT_PANE_{pane}_STATE", "idle"))
-    raw = tmux("show-option", "-gqv", OPTION)
+    options = option_snapshot()
+    raw = options.get(OPTION, "")
     data = json.loads(raw) if raw else {}
-    tracker = Notifications(data, live)
+    def option(name, default):
+        return options.get(name, default)
+
+    try:
+        delay = float(option("@agent-indicator-input-delay", "3"))
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError("invalid delay")
+    except ValueError:
+        delay = 3
+    questions = input_status.Questions(data.setdefault("questions", {}), live, delay,
+                                      lambda q, p, info: input_status.status(q, p, info, tmux))
+    tracker = Notifications(data, live, questions)
     action = sys.argv[1]
     apply_state = True
+    input_changes = []
     if action == "state":
         apply_state = tracker.state(*sys.argv[2:5], json.loads(os.environ.get("TMUX_AGENT_HOOK_DATA", "{}")))
     elif action == "handoff":
         tracker.handoff(json.loads(os.environ["TMUX_AGENT_NOTIFICATION_MESSAGE"]))
     elif action == "ack":
         tracker.acknowledge(sys.argv[2])
-    def option(name, default):
-        raw = tmux("show-option", "-gq", name)
-        return shlex.split(raw)[1] if raw else default
+    elif action == "input":
+        input_changes = questions.observed(*sys.argv[2:7])
+    if option("@agent-indicator-needs-input-enabled", "on").lower() in ("on", "true", "yes", "1"):
+        input_changes.extend(questions.check())
+    else:
+        affected = {pane: agent for pane, agent, _state, _notify in input_changes}
+        affected.update((pane, q["agent"]) for pane, q in questions.records.items())
+        input_changes = [(pane, agent, "off", False) for pane, agent in affected.items()]
+        questions.records.clear()
+    for pane, _agent, state, _notify in input_changes:
+        tracker.panes[pane]["state"] = state
 
     enabled = option("@agent-indicator-notification-enabled", "on")
     states = option("@agent-indicator-notification-states", "needs-input,done")
@@ -270,6 +326,9 @@ def main():
     for key in terminal[:-128]:
         del tracker.reviews[key]
     commands = ["set-option", "-gq", OPTION, json.dumps(data, separators=(",", ":"))]
+    for pane in live:
+        commands.extend([";", "set-option", "-pq", "-t", pane, "@agent-indicator-input-pending",
+                         questions.records.get(pane, {}).get("token", "")])
     for wid, window in tracker.windows.items():
         commands.extend([";", "set-option", "-wq", "-t", wid, "@agent-indicator-completion",
                          f'{data["epoch"]}:{window["sequence"]}:{int(window["ready"])}'])
@@ -280,6 +339,21 @@ def main():
         commands.extend([";", "set-option", "-wq", "-t", wid, "@agent-indicator-notification-error",
                          "Kibitz delivery failed" if failed else ""])
     tmux(*commands)
+    for pane, question in questions.started.items():
+        if questions.records.get(pane) is question:
+            try:
+                subprocess.Popen([sys.executable, str(Path(__file__).with_name("input-status.py")),
+                                  "watch", pane, json.dumps(question, separators=(",", ":"))],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+            except OSError:
+                pass  # The sweep checks the question if its reader cannot start.
+    for pane, agent, state, notify in input_changes:
+        print("INPUT", pane, agent, state, int(notify), live[pane]["pid"])
+    if action == "state" and apply_state is not False:
+        print("STATE", tracker.panes[sys.argv[2]]["state"])
+        if questions.silent:
+            print("QUIET input")
     # Handoffs and owner cleanup can change the color without another agent hook.
     for wid, window in tracker.windows.items():
         if window["review_pending"] != previous_pending[wid]:

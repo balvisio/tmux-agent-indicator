@@ -6,14 +6,30 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Full sweeps acquire one short-lived lock per window, letting hooks run between windows.
 if [ "$#" -eq 0 ]; then
     while IFS= read -r window_id; do
-        "$0" "$window_id"
+        "$0" --style-only "$window_id"
     done < <(tmux list-windows -a -F '#{window_id}' | sort -u)
+    "$0" --notifications
     exit 0
 fi
 source "$script_dir/state-lib.sh"
 lock_agent_state "$@"
 shift
 
+if [ "${1:-}" = --input-result ]; then
+    shift
+    reconcile_notifications input "$@"
+    exit 0
+fi
+if [ "${1:-}" = --notifications ]; then
+    sync_animation
+    reconcile_notifications sweep
+    exit 0
+fi
+style_only=false
+if [ "${1:-}" = --style-only ]; then
+    style_only=true
+    shift
+fi
 if [ "${1:-}" = --idle-style ]; then
     # The presence integration owns idle styling; active styling always comes from pane states.
     window_id="$2"
@@ -33,5 +49,7 @@ if [ "${1:-}" = --idle-style ]; then
 else
     render_window_state "$1"
 fi
-sync_animation
-reconcile_notifications sweep
+if [ "$style_only" = false ]; then
+    sync_animation
+    reconcile_notifications sweep
+fi

@@ -44,6 +44,9 @@ def main():
         agent = '''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys, time
 kind = pathlib.Path(sys.argv[0]).name
+if '--help' in sys.argv:
+    print('Usage: codex [--no-daemon]')
+    sys.exit(0)
 args = [arg for arg in sys.argv[1:] if arg not in ('--no-daemon', 'resume', '--resume')]
 session = args[0]
 reviewer = os.environ.get('KIBITZ_TEST_REVIEWER') == '1'
@@ -386,15 +389,18 @@ sys.exit(recovery.main())
             assert t("show", "-gqv", "@agent_recovery_warning") == warning
             assert latest.read_text() == saved
             save_script.write_text(save_source)
-            run(str(recovery), "save")
-            assert not t("show", "-gqv", "@agent_recovery_warning")
+            # A save can return successfully without writing when another
+            # background writer holds the lock. Wait for a successful writer.
+            wait_for(lambda: run(str(recovery), "save").returncode == 0
+                     and not t("show", "-gqv", "@agent_recovery_warning"))
             saved = latest.read_text()
             saved_path = latest.resolve()
             save_script.write_text("#!/bin/sh\nexit 1\n")
             run(str(recovery), "save", "--background")
             assert t("show", "-gqv", "@agent_recovery_warning")
             save_script.write_text(save_source)
-            run(str(recovery), "save", "--background")
+            wait_for(lambda: run(str(recovery), "save", "--background").returncode == 0
+                     and not t("show", "-gqv", "@agent_recovery_warning"))
             assert latest.resolve() == saved_path, "unchanged layout should reuse its snapshot"
             assert not t("show", "-gqv", "@agent_recovery_warning")
             assert not json.loads(health_file.read_text())["error"]

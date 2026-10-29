@@ -53,11 +53,29 @@ notify_state_change() {
 
 # Caller holds the state lock. Emit one completion after all work is accounted for.
 reconcile_notifications() {
-    local script_dir events pane agent skipped=false
+    local script_dir events pane agent skipped=false input_agent input_state input_notify input_pid
+    notification_silent=false
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     events=$(python3 "$script_dir/notification-state.py" "$@") || return 0
-    while read -r pane agent; do
+    while read -r pane agent input_agent input_state input_notify input_pid; do
         [ -n "$pane" ] || continue
+        if [ "$pane" = STATE ]; then
+            state="$agent"
+            continue
+        fi
+        if [ "$pane" = QUIET ]; then
+            notification_silent=true
+            continue
+        fi
+        if [ "$pane" = INPUT ]; then
+            if apply_agent_state "$agent" "$input_agent" "$input_state" "$input_pid"; then
+                sync_animation
+                if [ "$input_notify" = 1 ]; then
+                    notify_state_change "$input_agent" needs-input "$agent"
+                fi
+            fi
+            continue
+        fi
         if [ "$pane" = RENDER ]; then
             render_window_state "$agent"
             continue

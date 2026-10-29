@@ -38,6 +38,7 @@ Run individual checks:
 ./tests/test-resolve-ancestry.sh
 ./tests/test-cancellation-hooks.sh
 ./tests/test-notification-command.sh
+./tests/test-input-delay.py
 ./tests/test-running-animation.sh
 ./tests/test-ssh-reconnect.sh
 ./tests/test-vpn-guard.py
@@ -48,6 +49,15 @@ Run individual checks:
 ./tests/test-ssh-mouse.py
 ./tests/test-agent-recovery.py
 ```
+
+The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
+process inside the test pane. They verify early and late answers, stale status, parallel tools,
+duplicate questions, interruption, timer replacement, and yellow/magenta styles and bell counts.
+Codex dialog and composer fixtures check conservative recognition. Process inspection must be
+allowed inside the test panes. No personal startup files, agent settings, or running sessions change.
+The short-lived reader observes questions outside the writer lock. Checks cover stale reader results,
+reader failure, no periodic state writes while a question is open, and batched option reads preserving
+empty values, quotes, and newlines. Late answers are reconciled by the normal sweep.
 
 The installer checks use temporary homes and fake tool executables. They verify that missing tools,
 unsupported versions, malformed agent settings, and unwritable destinations leave existing files
