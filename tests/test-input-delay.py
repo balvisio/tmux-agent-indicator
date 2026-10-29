@@ -217,6 +217,24 @@ class QuestionsTest(unittest.TestCase):
             path.unlink()
             self.assertEqual(status.claude_status(q, str(os.getpid())), "unknown")
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS process timestamps")
+    def test_claude_utc_process_identity_survives_reader_timezone(self):
+        started = subprocess.check_output(
+            ["ps", "-p", str(os.getpid()), "-o", "lstart="],
+            env=dict(os.environ, TZ="UTC", LC_ALL="C"), text=True).strip()
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "sessions"
+            folder.mkdir()
+            record = folder / "record.json"
+            question = dict(session="one", config_dir=directory, received=time.time())
+            data = dict(sessionId="one", pid=os.getpid(), procStart=started, pidDomain="darwin",
+                        statusUpdatedAt=time.time() * 1000)
+            for zone in ("Pacific/Honolulu", "Asia/Tokyo"):
+                with self.subTest(zone=zone), patch.dict(os.environ, TZ=zone):
+                    for native, expected in (("busy", "answered"), ("waiting", "waiting")):
+                        record.write_text(json.dumps(dict(data, status=native)))
+                        self.assertEqual(status.claude_status(question, str(os.getpid())), expected)
+
 
 FAKE_AGENT = r'''
 import json, os, pathlib, subprocess, sys, time
@@ -228,7 +246,8 @@ if sys.platform == 'linux':
     started = pathlib.Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
     domain = 'linux:' + pathlib.Path('/etc/machine-id').read_text().strip() + ':' + os.readlink('/proc/self/ns/pid')
 else:
-    started = subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='], text=True).strip()
+    started = subprocess.check_output(['ps', '-p', str(os.getpid()), '-o', 'lstart='],
+                                      env=dict(os.environ, TZ='UTC', LC_ALL='C'), text=True).strip()
     domain = sys.platform
 previous = None
 while True:
@@ -285,7 +304,7 @@ class TmuxTest(unittest.TestCase):
                         TMUX_TMPDIR=str(self.root), XDG_CONFIG_HOME=str(self.root / "config"),
                         XDG_CACHE_HOME=str(self.root / "cache"), XDG_STATE_HOME=str(self.root / "state"),
                         CODEX_HOME=str(self.root / "codex"), CODEX_CONFIG_DIR=str(self.root / "codex"),
-                        ZDOTDIR=str(self.root), PYTHONDONTWRITEBYTECODE="1")
+                        ZDOTDIR=str(self.root), PYTHONDONTWRITEBYTECODE="1", TZ="Pacific/Honolulu")
         self.socket = str(self.root / "tmux.sock")
         self.addCleanup(lambda: subprocess.run(["tmux", "-S", self.socket, "kill-server"],
                                               env=self.env, capture_output=True, timeout=10))

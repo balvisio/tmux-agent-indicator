@@ -14,8 +14,10 @@ def process(pid):
     if sys.platform == "linux":
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         return int(fields[1]), fields[19]
+    # Claude records macOS process start times in UTC.
     output = subprocess.check_output(
         ["ps", "-p", str(pid), "-o", "ppid=", "-o", "lstart="],
+        env=dict(os.environ, TZ="UTC", LC_ALL="C"),
         text=True, stderr=subprocess.DEVNULL, timeout=1).strip().split(None, 1)
     return int(output[0]), " ".join(output[1].split())
 

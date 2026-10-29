@@ -53,6 +53,7 @@ Run individual checks:
 The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
 process inside the test pane. They verify early and late answers, stale status, parallel tools,
 duplicate questions, interruption, timer replacement, and yellow/magenta styles and bell counts.
+On macOS, the status fixtures use UTC process timestamps while readers run in other time zones.
 Codex fixtures render dialogs and the working composer in isolated tmux panes. They check that a
 missed dialog stays yellow and silent, while an unanswered dialog alerts once after the grace.
 Recognition checks include a screen read crossing the deadline. Process inspection must be
