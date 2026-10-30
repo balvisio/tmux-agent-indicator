@@ -584,6 +584,8 @@ working composer after a visible dialog closes, or at the end of the delay if th
 between checks. Copy mode, an unrecognized screen, or missing or stale status cannot confirm an
 answer, so these cases still alert after the delay. Quickly answered manual questions are silent too.
 Explicit `agent-state.sh` commands without a permission hook apply immediately.
+When Codex queues several command approvals, each distinct visible dialog gets its own grace
+period. Time spent behind another approval does not count toward that dialog's alert delay.
 
 Completion alerts sound once when all agents in the same
 window have finished or are idle. Agents in other windows do not delay the alert. Focusing a window

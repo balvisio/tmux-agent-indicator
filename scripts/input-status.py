@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Observe unanswered questions without reading input or sending keystrokes."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -86,27 +87,44 @@ def codex_screen(text, cursor_y, cursor_visible):
     return "unknown"
 
 
+def codex_dialog(text):
+    """Identify the visible command approval, excluding history and selection."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines)
+              if line.strip() == "Would you like to run the following command?"]
+    if not starts:
+        return ""
+    start = starts[-1]
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r"\s*›?\s*1\.\s", lines[i])), None)
+    if end is None:
+        return ""
+    body = " ".join(" ".join(lines[start:end]).split())
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 def status(question, pane, info, tmux):
+    """Return the observed state and, when recognizable, its visible dialog ID."""
     if question["agent"] == "claude":
         try:
-            return claude_status(question, info["pid"])
+            return claude_status(question, info["pid"]), ""
         except OSError:
-            return "unknown"
+            return "unknown", ""
     if question["agent"] == "codex":
         try:
             meta = tmux("display-message", "-p", "-t", pane,
                         "#{pane_current_command}|#{pane_in_mode}|#{cursor_y}|#{cursor_flag}|#{pane_pid}|#{pane_tty}").split("|")
             if meta[1] != "0":
-                return "unknown"
+                return "unknown", ""
             if meta[0] != "codex":
                 if meta[0] != "node":
-                    return "unknown"
+                    return "unknown", ""
                 commands = subprocess.check_output(
                     ["bash", str(Path(__file__).with_name("pane-processes.sh")), meta[4], meta[5]],
                     text=True, stderr=subprocess.DEVNULL, timeout=2)
                 if not any(Path(word).name == "codex" for line in commands.splitlines()
                            for word in line.split()[:2]):
-                    return "unknown"
+                    return "unknown", ""
             # Keep blank leading rows: cursor_y refers to the untrimmed grid.
             text = subprocess.check_output(["tmux", "capture-pane", "-p", "-t", pane],
                                            text=True, stderr=subprocess.DEVNULL, timeout=2)
@@ -115,11 +133,11 @@ def status(question, pane, info, tmux):
             # dialog. At the deadline it also covers answers between samples.
             if (result == "answered" and not question.get("seen_waiting")
                     and time.monotonic() < question["deadline"]):
-                return "unknown"
-            return result
+                return "unknown", ""
+            return result, codex_dialog(text) if result == "waiting" else ""
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-            return "unknown"
-    return "unknown"
+            return "unknown", ""
+    return "unknown", ""
 
 
 class Questions:
@@ -152,46 +170,69 @@ class Questions:
                 session=payload.get("session_id", ""), tool=tool,
                 received=payload.get("received_at", time.time()),
                 config_dir=payload.get("claude_config_dir", str(Path.home() / ".claude")),
-                deadline=self.now + self.delay, next_check=self.now + self.delay + 5,
+                delay=self.delay, deadline=self.now + self.delay, next_check=self.now + self.delay + 5,
                 shown=False, seen_waiting=False)
             self.started[pane] = self.records[pane]
             return "running"
         if not question:
             return state
         if state == "running" and event in ("PostToolUse", "PostToolUseFailure"):
-            observed = self.probe(question, pane, self.live[pane])
+            observed, dialog = self.probe(question, pane, self.live[pane])
             matching = bool(tool and tool == question["tool"]
                             and payload.get("session_id") == question["session"])
             if observed == "waiting":
                 question["seen_waiting"] = True
+                was_shown = question["shown"]
+                if self.dialog_changed(question, dialog, self.now):
+                    if was_shown:
+                        self.started[pane] = question
+                    return "running"
                 return None
             if observed != "answered" and not matching:
                 return None
         self.records.pop(pane, None)
         return state
 
+    def dialog_changed(self, question, dialog, observed_at):
+        question["sampled_at"] = observed_at
+        if not dialog or dialog == question.get("dialog"):
+            return False
+        question.update(dialog=dialog, delay=self.delay, deadline=observed_at + self.delay,
+                        next_check=observed_at + self.delay + 5, shown=False)
+        return True
+
     def check(self):
         changes = []
         for pane, question in list(self.records.items()):
             if self.now >= question["next_check"]:
-                observed = self.probe(question, pane, self.live[pane])
+                observed, dialog = self.probe(question, pane, self.live[pane])
                 if observed == "answered":
                     del self.records[pane]
                     changes.append((pane, question["agent"], "running", False))
                     continue
                 if observed == "waiting":
                     question["seen_waiting"] = True
+                    if self.dialog_changed(question, dialog, self.now):
+                        self.started[pane] = question
+                        changes.append((pane, question["agent"], "running", False))
+                        continue
                 if not question["shown"] and self.now >= question["deadline"]:
                     question["shown"] = True
                     changes.append((pane, question["agent"], "needs-input", True))
                 question["next_check"] = self.now + 5
         return changes
 
-    def observed(self, pane, token, pid, result, seen_waiting):
+    def observed(self, pane, token, pid, result, seen_waiting, dialog, observed_at):
         question = self.records.get(pane)
         if not question or question["token"] != token or question["pid"] != pid:
             return []
+        observed_at = float(observed_at)
+        if observed_at < question.get("sampled_at", 0):
+            return []
+        question["sampled_at"] = observed_at
         question["seen_waiting"] |= seen_waiting == "1"
+        if result == "waiting" and self.dialog_changed(question, dialog, observed_at):
+            return [(pane, question["agent"], "running", False)]
         if result == "answered":
             del self.records[pane]
             return [(pane, question["agent"], "running", False)]
@@ -217,17 +258,22 @@ def watch(pane, question):
         # Decide whether this is the final probe before reading the screen. If
         # the read crosses the deadline, take another sample before alerting.
         remaining = question["deadline"] - time.monotonic()
-        result = status(question, pane, {"pid": question["pid"]}, tmux)
+        result, dialog = status(question, pane, {"pid": question["pid"]}, tmux)
+        observed_at = time.monotonic()
+        changed = result == "waiting" and dialog and dialog != question.get("dialog")
         if result == "waiting":
             question["seen_waiting"] = True
-        if result == "answered" or remaining <= 0:
+        if changed:
+            question.update(dialog=dialog, deadline=observed_at + question["delay"])
+        if changed or result == "answered" or remaining <= 0:
             # The writer validates the token and process again: a hook can cancel
             # or replace the question between observing it and acquiring the lock.
             subprocess.run(["bash", str(Path(__file__).with_name("window-state.sh")),
                             "--input-result", pane, question["token"], question["pid"],
-                            result, str(int(question["seen_waiting"]))], check=True)
-            return
-        time.sleep(min(.25, remaining))
+                            result, str(int(question["seen_waiting"])), dialog, str(observed_at)], check=True)
+            if not changed:
+                return
+        time.sleep(max(0, min(.25, question["deadline"] - time.monotonic())))
 
 
 if __name__ == "__main__":

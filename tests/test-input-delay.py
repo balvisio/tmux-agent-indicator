@@ -24,15 +24,17 @@ class QuestionsTest(unittest.TestCase):
     def setUp(self):
         self.live = {"%1": {"pid": "42", "window": "@1"}}
         self.observed = "unknown"
-        self.q = status.Questions({}, self.live, 3, lambda *args: self.observed, now=10)
+        self.dialog = ""
+        self.q = status.Questions({}, self.live, 3, lambda *args: (self.observed, self.dialog), now=10)
         self.payload = dict(hook_event_name="PermissionRequest", session_id="one", tool_use_id="a")
 
     def question(self, **kw):
         return self.q.transition("%1", "claude", "needs-input", dict(self.payload, **kw))
 
-    def report(self, result="unknown"):
+    def report(self, result="unknown", dialog="", observed_at=None):
         question = self.q.records["%1"]
-        return self.q.observed("%1", question["token"], "42", result, "1")
+        return self.q.observed("%1", question["token"], "42", result, "1", dialog,
+                               str(self.q.now if observed_at is None else observed_at))
 
     def test_unknown_alerts_after_three_seconds_once(self):
         self.assertEqual(self.question(), "running")
@@ -97,9 +99,9 @@ class QuestionsTest(unittest.TestCase):
         self.question()
         old = dict(self.q.records["%1"])
         self.question(tool_use_id="b")
-        self.assertEqual(self.q.observed("%1", old["token"], "42", "answered", "1"), [])
+        self.assertEqual(self.q.observed("%1", old["token"], "42", "answered", "1", "", "13"), [])
         self.assertEqual(self.q.records["%1"]["tool"], "b")
-        self.assertEqual(self.q.observed("%1", self.q.records["%1"]["token"], "99", "answered", "1"), [])
+        self.assertEqual(self.q.observed("%1", self.q.records["%1"]["token"], "99", "answered", "1", "", "13"), [])
 
     def test_sweep_recovers_if_reader_dies(self):
         self.question()
@@ -109,17 +111,17 @@ class QuestionsTest(unittest.TestCase):
     def test_reader_observes_brief_dialog_without_state_writes(self):
         question = dict(pid="42", token="one", deadline=3, seen_waiting=False)
         def observe(q, *_args):
-            return "answered" if q["seen_waiting"] else "waiting"
+            return ("answered" if q["seen_waiting"] else "waiting"), ""
         with patch.object(status, "tmux", return_value="42|0|one"), \
                 patch.object(status, "status", side_effect=observe), \
-                patch.object(status.time, "monotonic", side_effect=[0, .25]), \
+                patch.object(status.time, "monotonic", side_effect=[0, 0, 0, .25, .25]), \
                 patch.object(status.time, "sleep") as sleep, \
                 patch.object(status.subprocess, "run") as run:
             status.watch("%1", question)
         sleep.assert_called_once_with(.25)
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0][-6:],
-                         ["--input-result", "%1", "one", "42", "answered", "1"])
+        self.assertEqual(run.call_args.args[0][-8:],
+                         ["--input-result", "%1", "one", "42", "answered", "1", "", "0.25"])
         with patch.object(status, "tmux", return_value="43|0|other"), \
                 patch.object(status.subprocess, "run") as run:
             status.watch("%1", question)
@@ -163,11 +165,11 @@ class QuestionsTest(unittest.TestCase):
             for now, expected in [(10, "unknown"), (12.99, "unknown"), (13, "answered"), (18, "answered")]:
                 with self.subTest(now=now), patch.object(status.time, "monotonic", return_value=now):
                     self.assertEqual(status.status(question, "%1", {"pid": "42"},
-                                                   lambda *args: "codex|0|3|1|42|tty"), expected)
+                                                   lambda *args: "codex|0|3|1|42|tty"), (expected, ""))
             question["seen_waiting"] = True
             with patch.object(status.time, "monotonic", return_value=11):
                 self.assertEqual(status.status(question, "%1", {"pid": "42"},
-                                               lambda *args: "codex|0|3|1|42|tty"), "answered")
+                                               lambda *args: "codex|0|3|1|42|tty"), ("answered", ""))
 
     def test_codex_unanswered_or_unreadable_screen_does_not_clear_at_deadline(self):
         question = dict(agent="codex", deadline=13, seen_waiting=False)
@@ -178,7 +180,7 @@ class QuestionsTest(unittest.TestCase):
             for meta, screen, expected in cases:
                 with self.subTest(meta=meta), patch.object(status.subprocess, "check_output", return_value=screen):
                     self.assertEqual(status.status(question, "%1", {"pid": "42"},
-                                                   lambda *args: meta), expected)
+                                                   lambda *args: meta), (expected, ""))
 
     def test_reader_rechecks_when_unseen_dialog_probe_crosses_deadline(self):
         question = dict(agent="codex", pid="42", token="one", deadline=3, seen_waiting=False)
@@ -187,14 +189,77 @@ class QuestionsTest(unittest.TestCase):
             return "42|0|one" if "input-pending" in args[-1] else "codex|0|3|1|42|tty"
         with patch.object(status, "tmux", side_effect=tmux), \
                 patch.object(status.subprocess, "check_output", return_value=normal), \
-                patch.object(status.time, "monotonic", side_effect=[2.99, 2.999, 3.001, 3.001]), \
+                patch.object(status.time, "monotonic", side_effect=[2.99, 2.999, 3.001, 3.001, 3.001, 3.001, 3.002]), \
                 patch.object(status.time, "sleep") as sleep, \
                 patch.object(status.subprocess, "run") as run:
             status.watch("%1", question)
         sleep.assert_called_once()
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0][-6:],
-                         ["--input-result", "%1", "one", "42", "answered", "0"])
+        self.assertEqual(run.call_args.args[0][-8:],
+                         ["--input-result", "%1", "one", "42", "answered", "0", "", "3.002"])
+
+    def test_queued_dialog_gets_its_own_grace(self):
+        self.question()
+        self.report("waiting", "first")
+        self.q.now = 12
+        self.report("waiting", "second")
+        self.assertEqual(self.q.records["%1"]["deadline"], 15)
+        self.q.now = 13.1
+        self.assertEqual(self.report("waiting", "second"), [])
+        self.assertFalse(self.q.records["%1"]["shown"])
+        self.q.now = 14
+        self.assertEqual(self.report("answered"), [("%1", "claude", "running", False)])
+        self.assertFalse(self.q.records)
+
+    def test_same_dialog_cannot_extend_deadline_and_next_dialog_clears_magenta(self):
+        self.question()
+        self.report("waiting", "first")
+        for now in [11, 12, 12.9]:
+            self.q.now = now
+            self.report("waiting", "first")
+        self.assertEqual(self.q.records["%1"]["deadline"], 13)
+        self.q.now = 13
+        self.assertEqual(self.report("waiting", "first"), [("%1", "claude", "needs-input", True)])
+        self.q.now = 14
+        self.assertEqual(self.report("waiting", "second"), [("%1", "claude", "running", False)])
+        self.assertFalse(self.q.records["%1"]["shown"])
+        self.q.now = 17
+        self.assertEqual(self.report("waiting", "second"), [("%1", "claude", "needs-input", True)])
+        self.assertEqual(self.report("waiting", "second"), [])
+
+    def test_old_dialog_sample_cannot_replace_a_new_one(self):
+        self.question()
+        self.report("waiting", "first")
+        self.q.now = 12
+        self.report("waiting", "second")
+        self.q.now = 14
+        self.assertEqual(self.report("waiting", "first", observed_at=11), [])
+        self.assertEqual(self.report("answered", observed_at=11), [])
+        self.assertEqual(self.q.records["%1"]["dialog"], "second")
+        self.assertFalse(self.q.records["%1"]["shown"])
+
+    def test_sweep_rearms_reader_for_a_new_dialog(self):
+        self.question()
+        self.report("waiting", "first")
+        self.q.now = 13
+        self.report("waiting", "first")
+        self.q.now = 18
+        self.observed, self.dialog = "waiting", "second"
+        self.assertEqual(self.q.check(), [("%1", "claude", "running", False)])
+        self.assertIs(self.q.started["%1"], self.q.records["%1"])
+        self.assertEqual(self.q.records["%1"]["deadline"], 21)
+        self.assertEqual(self.report("waiting", "first", observed_at=17), [])
+
+    def test_dialog_identity_ignores_history_and_selected_choice(self):
+        body = "Would you like to run the following command?\n\nReason: Read files\n\n$ cat first.txt\n"
+        choices = "\n› 1. Yes, proceed (y)\n  2. No\n\nPress enter to confirm or esc to cancel\n"
+        key = status.codex_dialog(body + choices)
+        self.assertTrue(key)
+        self.assertEqual(status.codex_dialog("different output\n" + body + choices), key)
+        self.assertEqual(status.codex_dialog(body + choices.replace("› 1.", "  1.").replace("  2.", "› 2.")), key)
+        self.assertEqual(status.codex_dialog(body.replace("Read files", "Read\nfiles") + choices), key)
+        self.assertNotEqual(status.codex_dialog(body.replace("first.txt", "second.txt") + choices), key)
+        self.assertEqual(status.codex_dialog("unknown dialog\n" + choices), "")
 
     def test_claude_status_requires_current_session_and_process(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -278,6 +343,9 @@ paint() {
             ;;
         waiting)
             printf '\033[2J\033[H\033[?25l\033[20;1HWould you like to run the following command?\033[22;1H› 1. Yes, proceed (y)\033[24;1HPress enter to confirm or esc to cancel'
+            ;;
+        waiting-*)
+            printf '\033[2J\033[H\033[?25l\033[16;1HWould you like to run the following command?\033[18;1H$ cat %s.txt\033[22;1H› 1. Yes, proceed (y)\033[24;1HPress enter to confirm or esc to cancel' "$(cat "$root/codex-screen")"
             ;;
     esac
 }
@@ -382,6 +450,41 @@ class TmuxTest(unittest.TestCase):
         ack.unlink(missing_ok=True)
         self.tmux("send-keys", "-t", self.pane, command, "Enter")
         self.wait(lambda: ack.exists() and ack.read_text() == command)
+
+    def question_record(self):
+        return json.loads(self.tmux("show-option", "-gqv", "@agent-indicator-notifications"))["questions"].get(self.pane, {})
+
+    def show_queued_codex_dialog(self):
+        self.codex_fixture()
+        self.codex_action("question", "waiting-first")
+        self.wait(lambda: bool(self.question_record().get("dialog")))
+        first = self.question_record()
+        time.sleep(max(0, first["deadline"] - time.monotonic() - 1))
+        # Queued approvals become visible without a new PermissionRequest hook.
+        self.codex_action("paint", "waiting-second")
+        self.wait(lambda: self.question_record().get("dialog") != first["dialog"])
+        second = self.question_record()
+        self.assertGreater(second["deadline"], first["deadline"] + 1)
+        time.sleep(max(0, first["deadline"] - time.monotonic() + .15))
+        self.assertEqual(self.state(), "running")
+        self.assertFalse(self.bells())
+        return second
+
+    def test_codex_queued_quick_answer_stays_yellow_and_silent(self):
+        second = self.show_queued_codex_dialog()
+        self.codex_action("paint", "working")
+        self.wait(lambda: not self.question_record())
+        time.sleep(max(0, second["deadline"] - time.monotonic() + .1))
+        self.assertEqual(self.state(), "running")
+        self.assertFalse(self.bells())
+
+    def test_codex_queued_unanswered_dialog_rings_after_its_own_grace(self):
+        second = self.show_queued_codex_dialog()
+        self.wait(lambda: self.bells() == ["needs-input"])
+        self.assertGreaterEqual(time.monotonic(), second["deadline"])
+        self.assertEqual(self.state(), "needs-input")
+        self.sweep()
+        self.assertEqual(self.bells(), ["needs-input"])
 
     def test_codex_dialog_missed_between_samples_stays_yellow_and_silent(self):
         self.codex_fixture()

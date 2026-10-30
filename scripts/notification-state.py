@@ -319,7 +319,7 @@ def main():
     elif action == "ack":
         tracker.acknowledge(sys.argv[2])
     elif action == "input":
-        input_changes = questions.observed(*sys.argv[2:7])
+        input_changes = questions.observed(*sys.argv[2:9])
     if option("@agent-indicator-needs-input-enabled", "on").lower() in ("on", "true", "yes", "1"):
         input_changes.extend(questions.check())
     else:

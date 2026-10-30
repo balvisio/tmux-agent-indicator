@@ -58,6 +58,10 @@ Codex fixtures render dialogs and the working composer in isolated tmux panes. T
 missed dialog stays yellow and silent, while an unanswered dialog alerts once after the grace.
 Recognition checks include a screen read crossing the deadline. Process inspection must be
 allowed inside the test panes. No personal startup files, agent settings, or running sessions change.
+Queued Codex approval fixtures change the visible command without emitting another permission hook.
+They verify a fresh grace period for the new dialog, silence for a quick answer, and one alert for an
+unanswered dialog. Identity checks ignore scrollback and selection changes; stale samples cannot
+replace a newer dialog.
 The short-lived reader observes questions outside the writer lock. Checks cover stale reader results,
 reader failure, no periodic state writes while a question is open, and batched option reads preserving
 empty values, quotes, and newlines. Late answers are reconciled by the normal sweep.
