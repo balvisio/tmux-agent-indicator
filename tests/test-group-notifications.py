@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -286,6 +287,123 @@ class CompletionTest(unittest.TestCase):
         self.n.state('%2', 'codex', 'running', p)
         self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
         self.assertTrue(all(r['phase'] == 'completed' for r in self.n.reviews.values()))
+
+
+class StorageIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix='notification-storage-')
+        self.addCleanup(self.directory.cleanup)
+        self.tmp = Path(self.directory.name)
+        self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.tmp), 'SHELL': '/bin/bash',
+                    'TMUX_TMPDIR': str(self.tmp), 'XDG_CONFIG_HOME': str(self.tmp/'config'),
+                    'XDG_CACHE_HOME': str(self.tmp/'cache'), 'XDG_STATE_HOME': str(self.tmp/'state'),
+                    'CODEX_HOME': str(self.tmp/'codex'), 'CODEX_CONFIG_DIR': str(self.tmp/'codex'),
+                    'ZDOTDIR': str(self.tmp), 'PYTHONDONTWRITEBYTECODE': '1'}
+        self.socket = str(self.tmp/'tmux.sock')
+        self.tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'test', '/bin/bash --noprofile --norc')
+        self.addCleanup(lambda: subprocess.run(['tmux', '-S', self.socket, 'kill-server'],
+                                               env=self.env, capture_output=True))
+        self.env['TMUX'] = self.tmux('display-message', '-p', '#{socket_path},#{pid},0')
+        self.host = self.tmux('display-message', '-p', '#{pane_id}')
+        self.window = self.tmux('display-message', '-p', '#{window_id}')
+        self.bells = self.tmp/'bells'
+        self.tmux('set', '-g', '@agent-indicator-style-active-window', 'on')
+        self.tmux('set', '-g', '@agent-indicator-notification-message', 'off')
+        self.tmux('set', '-g', '@agent-indicator-notification-command',
+                  'printf "%s\\n" "$AGENT_STATE" >> '+shlex.quote(str(self.bells)))
+
+    def tmux(self, *args):
+        return subprocess.check_output(['tmux', '-S', self.socket, *args], env=self.env,
+                                       text=True, stderr=subprocess.STDOUT, timeout=10).strip()
+
+    def hook(self, pane, state, data, env=None):
+        return subprocess.run([str(ROOT/'scripts/agent-state.sh'), '--hook', '--agent', 'claude',
+                               '--state', state], input=json.dumps(data),
+                              env=dict(env or self.env, TMUX_PANE=pane), text=True,
+                              check=True, capture_output=True, timeout=20)
+
+    def tracking(self):
+        return json.loads(self.tmux('show-option', '-gqv', module.OPTION))
+
+    def test_large_history_preserves_grace_and_grouped_completion(self):
+        reviewer = self.tmux('split-window', '-d', '-P', '-F', '#{pane_id}',
+                             '/bin/bash --noprofile --norc')
+        self.tmux('set', '-p', '-t', reviewer, '@kibitz_host_pane', self.host)
+        old = dict(host=self.host, reviewer=reviewer,
+                   host_pid=self.tmux('display-message', '-p', '-t', self.host, '#{pane_pid}'),
+                   reviewer_pid=self.tmux('display-message', '-p', '-t', reviewer, '#{pane_pid}'),
+                   session='11111111-2222-3333-4444-555555555555', phase='completed',
+                   hash='a'*64, turn='22222222-3333-4444-5555-666666666666:previous')
+        reviews = {str(i): dict(old, prompt=f'previous-{i}-'+'x'*220) for i in range(128)}
+        initial = json.dumps({'reviews': reviews})
+        self.assertGreater(len(initial), 65536)
+        subprocess.run(['tmux', '-S', self.socket, 'source-file', '-'], env=self.env,
+                       input='set -g '+module.OPTION+' '+shlex.quote(initial)+'\n', text=True,
+                       check=True, capture_output=True, timeout=10)
+        self.tmux('set', '-g', '@agent-indicator-input-delay', '30')
+
+        host_data = dict(session_id='host', prompt_id='new', hook_event_name='UserPromptSubmit')
+        self.hook(self.host, 'running', host_data)
+        host_data['hook_event_name'] = 'Stop'
+        self.hook(self.host, 'done', host_data)
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        handoff = dict(old, action='queue', session_id='host', prompt_id='new',
+                       hash=module.message_hash('review'))
+        subprocess.run([str(ROOT/'scripts/agent-notify.sh')], input=json.dumps(handoff),
+                       env=self.env, text=True, check=True, capture_output=True, timeout=20)
+        data = dict(session_id='reviewer', turn_id='new-review', hook_event_name='UserPromptSubmit',
+                    prompt='review')
+        self.hook(reviewer, 'running', data)
+        data.update(hook_event_name='PermissionRequest', tool_use_id='tool')
+        self.hook(reviewer, 'needs-input', data)
+        self.assertFalse(self.tracking()['questions'][reviewer]['shown'])
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        self.assertFalse(self.bells.exists())
+        data['hook_event_name'] = 'PostToolUse'
+        self.hook(reviewer, 'running', data)
+        self.assertNotIn(reviewer, self.tracking()['questions'])
+        data['hook_event_name'] = 'Stop'
+        self.hook(reviewer, 'done', data)
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        self.assertIn('bg=red', self.tmux('show-option', '-wqv', 'window-status-style'))
+        self.assertTrue(self.tracking()['windows'][self.window]['ready'])
+        self.assertEqual(self.tracking()['reviews'][module.exchange_id('host', 'new')]['phase'], 'completed')
+        self.assertGreater(len(json.dumps(self.tracking())), 65536)
+        for _ in range(50):
+            if self.bells.exists():
+                break
+            time.sleep(.02)
+        self.assertEqual(self.bells.read_text(), 'done\n')
+
+    def test_streamed_options_preserve_literal_values(self):
+        value = 'x'*80000 + " '$HOME' \\\n\\\"; set -g @injected yes; # ☃ #{pane_id}"
+        with patch.dict(os.environ, self.env, clear=True):
+            module.tmux_commands([['set-option', '-g', '@literal', value],
+                                  ['set-option', '-g', '@empty', '']])
+        self.assertEqual(self.tmux('show-option', '-gqv', '@literal'), value)
+        self.assertEqual(self.tmux('show-option', '-gqv', '@empty'), '')
+        self.assertEqual(self.tmux('show-option', '-gqv', '@injected'), '')
+
+    def test_failed_write_cannot_publish_a_color_or_ring(self):
+        data = dict(session_id='host', prompt_id='new', hook_event_name='UserPromptSubmit')
+        self.hook(self.host, 'running', data)
+        before = self.tracking()
+        self.tmux('set', '-g', '@agent-indicator-input-delay', '0')
+        bindir = self.tmp/'bin'
+        bindir.mkdir()
+        wrapper = bindir/'tmux'
+        wrapper.write_text('#!/bin/sh\nif [ "$1" = source-file ]; then echo "fixture write failed" >&2; exit 1; fi\n'
+                           'exec '+shlex.quote(shutil.which('tmux'))+' "$@"\n')
+        wrapper.chmod(0o755)
+        data['hook_event_name'] = 'PermissionRequest'
+        result = self.hook(self.host, 'needs-input', data,
+                           dict(self.env, PATH=str(bindir)+os.pathsep+self.env['PATH']))
+        self.assertIn('fixture write failed', result.stderr)
+        self.assertEqual(self.tracking(), before)
+        self.assertEqual(self.tmux('show-environment', '-g', f'TMUX_AGENT_PANE_{self.host}_STATE'),
+                         f'TMUX_AGENT_PANE_{self.host}_STATE=running')
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        self.assertFalse(self.bells.exists())
 
 
 class HookIntegrationTest(unittest.TestCase):

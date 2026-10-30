@@ -62,6 +62,11 @@ The short-lived reader observes questions outside the writer lock. Checks cover 
 reader failure, no periodic state writes while a question is open, and batched option reads preserving
 empty values, quotes, and newlines. Late answers are reconciled by the normal sweep.
 
+Notification storage checks use a review history larger than tmux's command-message limit.
+They verify that delayed questions, grouped completion, and window colours remain consistent,
+that streamed values retain literal characters, and that a failed write cannot publish a colour
+or ring a bell.
+
 The installer checks use temporary homes and fake tool executables. They verify that missing tools,
 unsupported versions, malformed agent settings, and unwritable destinations leave existing files
 unchanged. They also check disabled-hook warnings, terminal colors, skipped integrations, optional

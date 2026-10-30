@@ -246,6 +246,19 @@ def tmux(*args):
     return subprocess.check_output(["tmux", *args], text=True, timeout=5).strip()
 
 
+def tmux_commands(commands):
+    # The client command message has a size limit. Stream the snapshot through
+    # stdin so retained reviews and pending questions cannot exceed that limit.
+    # Escape newlines as well: tmux removes backslash-newline continuations even
+    # inside shell-style single quotes. Dollar signs must stay literal too.
+    escapes = {'\\': '\\\\', '"': '\\"', '$': '\\$', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
+    def quote(value):
+        return '"' + ''.join(escapes.get(char, char) for char in value) + '"'
+    source = "\n".join(" ".join(quote(arg) for arg in command) for command in commands) + "\n"
+    subprocess.run(["tmux", "source-file", "-"], input=source, text=True,
+                   stdout=subprocess.PIPE, check=True, timeout=5)
+
+
 def option_snapshot():
     """Read raw option values in one batch, preserving quotes and empty values."""
     names = [line.split(" ", 1)[0] for line in tmux("show-options", "-g").splitlines()
@@ -328,20 +341,20 @@ def main():
     terminal = [key for key, review in tracker.reviews.items() if review["phase"] in TERMINAL]
     for key in terminal[:-128]:
         del tracker.reviews[key]
-    commands = ["set-option", "-gq", OPTION, json.dumps(data, separators=(",", ":"))]
+    commands = [["set-option", "-gq", OPTION, json.dumps(data, separators=(",", ":"))]]
     for pane in live:
-        commands.extend([";", "set-option", "-pq", "-t", pane, "@agent-indicator-input-pending",
+        commands.append(["set-option", "-pq", "-t", pane, "@agent-indicator-input-pending",
                          questions.records.get(pane, {}).get("token", "")])
     for wid, window in tracker.windows.items():
-        commands.extend([";", "set-option", "-wq", "-t", wid, "@agent-indicator-completion",
+        commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-completion",
                          f'{data["epoch"]}:{window["sequence"]}:{int(window["ready"])}'])
-        commands.extend([";", "set-option", "-wq", "-t", wid, "@agent-indicator-review-pending",
+        commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-review-pending",
                          str(int(window["review_pending"]))])
         failed = any(r["phase"] == "error" and r["host"] in live
                      and live[r["host"]]["window"] == wid for r in tracker.reviews.values())
-        commands.extend([";", "set-option", "-wq", "-t", wid, "@agent-indicator-notification-error",
+        commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-notification-error",
                          "Kibitz delivery failed" if failed else ""])
-    tmux(*commands)
+    tmux_commands(commands)
     for pane, question in questions.started.items():
         if questions.records.get(pane) is question:
             try:
