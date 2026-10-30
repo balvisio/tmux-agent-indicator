@@ -594,8 +594,9 @@ the draft does not block later completion alerts.
 For Kibitz pairs, update and reinstall both plugins. The indicator waits for the specific forwarded
 review, including queued reviews; `/mute` skips that wait and `/tee` tracks the review started at prompt
 submission. Pending reviews also keep the window title and menu-bar dot yellow between agents;
-input-needed magenta still takes priority. There is no fixed delay or timeout that treats unfinished
-reviews as complete. These hooks require Claude's `prompt_id` and Codex's `turn_id` fields. After
+input-needed magenta still takes priority. Claude's background-task completion messages continue the
+original request instead of reserving another review. There is no fixed delay or timeout that treats
+unfinished reviews as complete. These hooks require Claude's `prompt_id` and Codex's `turn_id` fields. After
 reinstalling the indicator, run `/hooks` in Codex to trust its commands.
 
 SSH and VS Code hosts need the indicator update too. Reload Hammerspoon after updating its module.

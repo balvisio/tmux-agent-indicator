@@ -39,6 +39,7 @@ def hook_data(payload):
     result["received_at"] = input_status.time.time()
     result["claude_config_dir"] = os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
     prompt = payload.get("prompt") or ""
+    result["task_notification"] = prompt.lstrip().startswith("<task-notification>")
     intervals = {(0, len(prompt))} if prompt else set()
     # Codex may process several queued messages in one turn. Match each complete
     # forwarded exchange, including messages containing a quoted kibitz header.
@@ -140,7 +141,9 @@ class Notifications:
             if turn and current["last_done"] == turn:
                 return False
             self.begin(pane, turn)
-            if not self.live[pane].get("host"):
+            # Claude's background-task wakeup has a new prompt ID, but its
+            # review belongs to the original human prompt reserved at submission.
+            if not self.live[pane].get("host") and not (agent == "claude" and payload.get("task_notification")):
                 self.reserve(pane, session, prompt)
             matches = Counter(payload.get("message_hashes", []))
             for review in self.reviews.values():

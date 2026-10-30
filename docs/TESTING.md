@@ -333,6 +333,9 @@ The tests cover delayed delivery, queued and identical exchanges, `/mute`, `/tee
 stops, focus acknowledgement, pane replacement, delivery failure, and interruption with queued work.
 The hook integration checks yellow across the handoff, magenta priority, and color reset on skips,
 interruptions and reviewer closure, including when notification sounds are disabled.
+Background-task wakeups are replayed through both orders of the Claude and Kibitz prompt hooks;
+the original request must remain yellow and silent until its review completes, with no extra
+reservation for the wakeup. Codex tool yields must not complete the review before its Stop hook.
 `tests/test-hammerspoon-dots.py` checks remote completion event delivery and duplicate window listings.
 
 For a manual check, update both plugins and trust the indicator hooks in Codex. Submit a prompt to a
@@ -342,3 +345,5 @@ stay silent while Codex reviews, and Codex finishing must produce one completion
 without ringing; a queued review returned to the input box must be tracked when resubmitted, and
 discarding it must not block later completion alerts. Repeat on an updated SSH or VS Code host with
 Hammerspoon running.
+Also run a background shell task in Claude and a yielding shell command in its Codex reviewer.
+Check yellow through both tasks and a single completion after the reviewer finishes.

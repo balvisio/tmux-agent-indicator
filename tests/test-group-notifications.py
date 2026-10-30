@@ -106,6 +106,45 @@ class CompletionTest(unittest.TestCase):
         self.handoff('queue')
         self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
 
+    def test_background_notification_keeps_original_review_without_reserving_another(self):
+        self.state('%1', 'running')
+        self.assertFalse(self.state('%1', 'done'))
+        notification = module.hook_data(dict(session_id='host', prompt_id='task-finished',
+            hook_event_name='UserPromptSubmit',
+            prompt='\n<task-notification><task-id>shell</task-id></task-notification>'))
+        self.n.state('%1', 'claude', 'running', notification)
+        self.assertFalse(self.n.completions())
+        self.assertEqual(self.n.panes['%1']['state'], 'running')
+        self.assertEqual(len(self.n.reviews), 1)
+        self.assertFalse(self.state('%1', 'done', 'task-finished'))
+        self.handoff('queue')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+        self.assertFalse(self.n.windows['@1']['review_pending'])
+
+    def test_codex_yielded_shell_does_not_finish_its_review(self):
+        self.state('%1', 'running')
+        self.state('%1', 'done')
+        self.handoff('queue')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        for call in ('exec_command', 'write_stdin', 'write_stdin'):
+            p = module.hook_data(dict(session_id='reviewer', turn_id='r1',
+                hook_event_name='PostToolUse', tool_name=call,
+                tool_response={'session_id': 123}))
+            self.n.state('%2', 'codex', 'running', p)
+            self.assertFalse(self.n.completions())
+            self.assertEqual(self.n.panes['%2']['state'], 'running')
+        self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+
+    def test_task_notification_classification_does_not_swallow_ordinary_prompts(self):
+        for text in ('Explain <task-notification>', '"<task-notification>"'):
+            with self.subTest(text=text):
+                self.setUp()
+                p = module.hook_data(dict(session_id='host', prompt_id='one',
+                    hook_event_name='UserPromptSubmit', prompt=text))
+                self.n.state('%1', 'claude', 'running', p)
+                self.assertEqual(len(self.n.reviews), 1)
+
     def test_permission_resume_cannot_consume_a_pending_review(self):
         self.state('%1', 'running')
         self.state('%2', 'running', 'old', 'reviewer', 'unrelated')
@@ -353,6 +392,69 @@ class HookIntegrationTest(unittest.TestCase):
                 self.assertEqual(event.split(':')[1:], ['1', '1'], event)
                 run(ROOT/'scripts/agent-state.sh',reviewer_data,'--hook','--agent','claude','--state','done',pane=reviewer)
                 self.assertEqual(log.read_text(), 'needs-input\ndone\n')
+
+                # Replay real background-task wakeups through both hook orders.
+                # Each gets a new Claude prompt ID, but only the human prompt is
+                # forwarded. The reviewer may also yield a long-running tool.
+                for index, indicator_first in enumerate((False, True)):
+                    human = f'background-{index}'
+                    task = f'shell-{index}'
+                    notice = f'<task-notification><task-id>{task}</task-id></task-notification>'
+                    entries = [dict(type='user', promptId=human,
+                                    message={'role':'user', 'content':'run a shell task'})]
+                    transcript.write_text(json.dumps(entries[0])+'\n')
+                    data = dict(session_id='host', prompt_id=human, prompt='run a shell task',
+                                hook_event_name='UserPromptSubmit', transcript_path=str(transcript))
+
+                    def submit_background():
+                        calls = [(ROOT/'scripts/agent-state.sh',
+                                  ('--hook', '--agent', 'claude', '--state', 'running')),
+                                 (kibitz/'hooks/kibitz_hook_user_prompt_submit.py', ())]
+                        if not indicator_first:
+                            calls.reverse()
+                        for script, args in calls:
+                            run(script, data, *args, pane=host)
+
+                    submit_background()
+                    entries.append(dict(type='user', toolUseResult={'backgroundTaskId':task},
+                        message={'role':'user', 'content':[{'type':'tool_result', 'content':'running'}]}))
+                    transcript.write_text(''.join(json.dumps(e)+'\n' for e in entries))
+                    data.update(hook_event_name='Stop', last_assistant_message='task running',
+                                background_tasks=[{'id':task, 'status':'running', 'type':'shell'}])
+                    before = log.read_text()
+                    run(ROOT/'scripts/agent-state.sh', data,'--hook','--agent','claude','--state','done',pane=host)
+                    run(kibitz/'hooks/kibitz_hook_stop.py', data, pane=host)
+                    assert_color('running', 'yellow')
+                    self.assertEqual(log.read_text(), before)
+
+                    data.update(prompt_id=human+'-wake', prompt=notice, hook_event_name='UserPromptSubmit')
+                    entries.append(dict(type='user', promptId=data['prompt_id'],
+                        origin={'kind':'task-notification'}, message={'role':'user', 'content':notice}))
+                    transcript.write_text(''.join(json.dumps(e)+'\n' for e in entries))
+                    submit_background()
+                    assert_color('running', 'yellow')
+                    data.update(hook_event_name='Stop', last_assistant_message='task finished', background_tasks=[])
+                    run(ROOT/'scripts/agent-state.sh', data,'--hook','--agent','claude','--state','done',pane=host)
+                    run(kibitz/'hooks/kibitz_hook_stop.py', data, pane=host)
+                    assert_color('running', 'yellow')
+                    tracking = json.loads(tmux('show-option','-gqv',module.OPTION))
+                    self.assertNotIn(module.exchange_id('host', human+'-wake'), tracking['reviews'])
+                    review = dict(session_id='reviewer', turn_id='review-'+human,
+                        hook_event_name='UserPromptSubmit',
+                        prompt='[kibitz from:claude]\n\nUSER:\nrun a shell task\n\nCLAUDE:\ntask finished')
+                    run(ROOT/'scripts/agent-state.sh', review,'--hook','--agent','claude','--state','running',pane=reviewer)
+                    review.update(hook_event_name='PostToolUse', tool_response={'session_id':123})
+                    run(ROOT/'scripts/agent-state.sh', review,'--hook','--agent','claude','--state','running',pane=reviewer)
+                    assert_color('running', 'yellow')
+                    self.assertEqual(log.read_text(), before)
+                    review['hook_event_name'] = 'Stop'
+                    run(ROOT/'scripts/agent-state.sh', review,'--hook','--agent','claude','--state','done',pane=reviewer)
+                    assert_color('done', 'red')
+                    assert_pending(0)
+                    for _ in range(50):
+                        if log.read_text() != before: break
+                        time.sleep(.02)
+                    self.assertEqual(log.read_text(), before+'done\n')
 
                 # A late skip must release yellow immediately, without a new state hook.
                 data.update(prompt_id='h2', prompt='fixture /mute', hook_event_name='UserPromptSubmit')
