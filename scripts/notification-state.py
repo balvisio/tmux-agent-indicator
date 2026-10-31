@@ -206,6 +206,17 @@ class Notifications:
         if str(message.get("host_pid", "")) != self.live[host]["pid"]:
             return
         session, prompt = message.get("session_id", ""), message.get("prompt_id", "")
+        if message.get("action") == "cancel":
+            for prompt in message.get("prompt_ids", [prompt]):
+                review = self.reviews.get(exchange_id(session, prompt))
+                if not review or review["host"] != host or review["phase"] != "expected":
+                    continue
+                review["phase"] = "cancelled"
+                # An abandoned exchange is not a completion. Preserve a newer
+                # turn's bell; this reservation never reached the reviewer.
+                if self.panes[host]["turn"] == session + ":" + prompt:
+                    self.windows[self.live[host]["window"]]["pending"].pop(host, None)
+            return
         review = self.reserve(host, session, prompt, message.get("reviewer"))
         if not review:
             return

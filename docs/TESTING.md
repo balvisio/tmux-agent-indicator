@@ -345,6 +345,9 @@ interruptions and reviewer closure, including when notification sounds are disab
 Background-task wakeups are replayed through both orders of the Claude and Kibitz prompt hooks;
 the original request must remain yellow and silent until its review completes, with no extra
 reservation for the wakeup. Codex tool yields must not complete the review before its Stop hook.
+Cancellation tests distinguish abandoned reservations from dispatched reviews and preserve a newer
+turn's completion. Kibitz's handoff tests cover replaced prompts, successful and failed TaskStop calls,
+remaining background work, and retrying a failed cancellation.
 `tests/test-hammerspoon-dots.py` checks remote completion event delivery and duplicate window listings.
 
 For a manual check, update both plugins and trust the indicator hooks in Codex. Submit a prompt to a

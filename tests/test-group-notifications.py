@@ -67,6 +67,46 @@ class CompletionTest(unittest.TestCase):
         self.state('%2', 'running', 'r1', 'reviewer', 'review')
         self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
 
+    def test_abandoned_expectation_cancels_without_a_completion_bell(self):
+        self.state('%1', 'running')
+        self.state('%1', 'done')
+        self.assertFalse(self.handoff('cancel'))
+        self.assertFalse(self.n.windows['@1']['review_pending'])
+        self.assertTrue(self.n.windows['@1']['ready'])
+        self.assertEqual(self.n.reviews[module.exchange_id('host', 'h1')]['phase'], 'cancelled')
+        self.assertFalse(self.handoff('cancel'))
+
+    def test_abandoned_expectation_preserves_a_newer_completion(self):
+        self.state('%1', 'running')
+        self.state('%1', 'done')
+        self.state('%1', 'running', 'h2')
+        self.handoff('skip', 'h2')
+        self.state('%1', 'done', 'h2')
+        self.assertEqual(len(self.handoff('cancel')), 1)
+        self.assertFalse(self.handoff('cancel'))
+
+    def test_cancellation_cannot_release_a_dispatched_review(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.state('%1', 'done')
+        self.assertFalse(self.handoff('cancel'))
+        self.assertEqual(self.n.reviews[module.exchange_id('host', 'h1')]['phase'], 'queued')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        self.assertFalse(self.handoff('cancel'))
+        self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+
+    def test_batched_cancellation_ignores_unknown_and_other_host_reviews(self):
+        self.handoff('expect', 'h1')
+        self.handoff('expect', 'h2')
+        other = dict(self.n.reviews[module.exchange_id('host', 'h1')], host='%2', prompt='other')
+        self.n.reviews[module.exchange_id('host', 'other')] = other
+        self.n.handoff(dict(action='cancel', host='%1', host_pid='101', session_id='host',
+                            prompt_ids=['h1', 'h2', 'unknown', 'other']))
+        self.assertEqual(len(self.n.reviews), 3)
+        self.assertEqual(other['phase'], 'expected')
+        for prompt in ('h1', 'h2'):
+            self.assertEqual(self.n.reviews[module.exchange_id('host', prompt)]['phase'], 'cancelled')
+
     def test_older_review_cannot_release_a_newer_queued_exchange(self):
         self.state('%1', 'running')
         self.handoff('queue', text='first')
@@ -383,6 +423,58 @@ class StorageIntegrationTest(unittest.TestCase):
         self.assertEqual(self.tmux('show-option', '-gqv', '@literal'), value)
         self.assertEqual(self.tmux('show-option', '-gqv', '@empty'), '')
         self.assertEqual(self.tmux('show-option', '-gqv', '@injected'), '')
+
+    def test_kibitz_cancels_abandoned_reviews_without_losing_new_completion(self):
+        kibitz = Path(os.environ.get('KIBITZ_TEST_REPO', ROOT.parent / 'kibitz'))
+        if not (kibitz/'hooks/kibitz_notifications.py').exists():
+            self.skipTest('set KIBITZ_TEST_REPO')
+        reviewer = self.tmux('split-window', '-d', '-P', '-F', '#{pane_id}',
+                             '/bin/bash --noprofile --norc')
+        self.tmux('set', '-p', '-t', reviewer, '@kibitz_host_pane', self.host)
+        self.tmux('set', '-p', '-t', reviewer, '@name', 'codex')
+        transcript = self.tmp/'transcript.jsonl'
+        def run(name, data):
+            subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
+                           env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
+                           text=True, check=True, capture_output=True, timeout=20)
+        for number, kind in enumerate(('replacement', 'TaskStop'), 1):
+            old, new = kind+'-old', kind+'-new'
+            entries = [dict(type='user', promptId=old, uuid=old, parentUuid='anchor',
+                            message={'content': 'old question'})]
+            data = dict(session_id='host', prompt_id=old, prompt='old question',
+                        hook_event_name='UserPromptSubmit', transcript_path=str(transcript))
+            run('kibitz_hook_user_prompt_submit.py', data)
+            self.hook(self.host, 'running', data)
+            if kind == 'TaskStop':
+                entries.append(dict(type='user', toolUseResult={'backgroundTaskId':'task'},
+                                    message={'content': []}))
+            self.hook(self.host, 'done', dict(data, hook_event_name='Stop'))
+            entries.append(dict(type='user', promptId=new, uuid=new,
+                                parentUuid='anchor' if kind == 'replacement' else old,
+                                message={'content': 'new question /mute'}))
+            if kind == 'TaskStop':
+                entries.extend([
+                    dict(type='assistant', message={'content':[dict(type='tool_use', id='stop',
+                        name='TaskStop', input={'task_id':'task'})]}),
+                    dict(type='user', message={'content':[dict(type='tool_result', tool_use_id='stop',
+                        is_error=False)]}, toolUseResult={'task_id':'task'}),
+                ])
+            transcript.write_text(''.join(json.dumps(e)+'\n' for e in entries))
+            data.update(prompt_id=new, prompt='new question /mute')
+            run('kibitz_hook_user_prompt_submit.py', data)
+            self.hook(self.host, 'running', data)
+            data.update(hook_event_name='Stop', last_assistant_message='answer', background_tasks=[])
+            self.hook(self.host, 'done', data)
+            self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+            run('kibitz_hook_stop.py', data)
+            self.assertEqual(self.tracking()['reviews'][module.exchange_id('host', old)]['phase'], 'cancelled')
+            self.assertFalse(self.tracking()['windows'][self.window]['review_pending'])
+            self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+            for _ in range(50):
+                if self.bells.exists() and self.bells.read_text().count('done\n') == number:
+                    break
+                time.sleep(.02)
+            self.assertEqual(self.bells.read_text(), 'done\n'*number)
 
     def test_failed_write_cannot_publish_a_color_or_ring(self):
         data = dict(session_id='host', prompt_id='new', hook_event_name='UserPromptSubmit')
