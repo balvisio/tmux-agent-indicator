@@ -233,6 +233,38 @@ before changing it; future macOS versions may require an update to this integrat
 
 Every other option is listed in the reference below.
 
+### Logo fonts
+
+Install Symbols Nerd Font 3.5.1 or newer on the Mac:
+
+```bash
+brew install --cask font-symbols-only-nerd-font
+```
+
+1. Open **iTerm2 → Settings → Profiles**, select the profile you use, then open **Text**.
+2. Keep your preferred regular font and enable **Use a different font for non-ASCII text**.
+3. Set the non-ASCII font to **Symbols Nerd Font Mono**, with the same point size as the regular font.
+4. Repeat for any other profiles you use.
+
+For VS Code on macOS, open **Preferences: Open User Settings (JSON)** and add the symbol font
+to the terminal font fallback list. Keep your preferred text font first; for the default macOS fonts:
+
+```json
+"terminal.integrated.fontFamily": "Menlo, Monaco, 'Courier New', 'Symbols Nerd Font Mono', monospace"
+```
+
+Verify the Claude and OpenAI logos in the terminal:
+
+```bash
+python3 -c 'print("Claude: \uec82  OpenAI: \uec81")'
+```
+
+The OpenAI logo can represent Codex. These are monochrome font glyphs and follow the text colour.
+The shipped window labels use these logos. Install the font on the computer displaying the terminal,
+including for remote SSH sessions; it is not needed on the remote host.
+See [iTerm2 font settings](https://iterm2.com/documentation-preferences-profiles-text.html) and
+[VS Code terminal fonts](https://code.visualstudio.com/docs/terminal/appearance#_text-style).
+
 ### Keyboard passthrough to a remote tmux
 
 With `set -g mouse on`, clicking an SSH window or pane hands it keyboard control. Click the
