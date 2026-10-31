@@ -188,6 +188,19 @@ Run the install command again. Then `/hooks` in Codex if a hook changed, and rel
 
 ## Customize
 
+The SSH window group starts with one solid grey block, directly against the first SSH label. Change it in
+`~/.tmux/agent-indicator.local.conf`, or use an empty value to hide it:
+
+```tmux
+set -g @ssh_separator '#[norange default bg=colour245] #[default]'
+```
+
+Overflow arrows use bright cyan on dark grey. To change their colours:
+
+```tmux
+set -g @window_overflow_style 'fg=colour51,bg=colour238,bold'
+```
+
 Put your settings in `~/.tmux/agent-indicator.local.conf`. It is loaded after the defaults and never
 touched by the installer. Colours per state:
 
