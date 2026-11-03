@@ -360,3 +360,11 @@ discarding it must not block later completion alerts. Repeat on an updated SSH o
 Hammerspoon running.
 Also run a background shell task in Claude and a yielding shell command in its Codex reviewer.
 Check yellow through both tasks and a single completion after the reviewer finishes.
+
+Claude `!` shell continuations are covered by `tests/test-group-notifications.py`: after a completed
+prompt, a live busy session and a newer shell submission must restore running/yellow on the sweep.
+The matching Stop completes once; an older Stop, interrupted shell, reused PID, wrong PID namespace,
+partial transcript, or already-finished shell must not revive work. A short continuation that stops
+before the sweep still completes once, without reserving a Kibitz review. For a manual check, finish
+a normal Claude turn, run a harmless `!` command, and let Claude respond to its output. Check yellow
+during a long response and completion afterward, then repeat with Ctrl+C.

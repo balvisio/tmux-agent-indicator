@@ -30,15 +30,18 @@ def pid_domain():
     return sys.platform
 
 
-def claude_status(question, pane_pid):
+def claude_session(question, pane_pid, statuses=None):
+    """Read native status only from the live Claude process belonging to this pane."""
     session = question["session"]
     if not session:
-        return "unknown"
+        return None
     domain = pid_domain()
     for path in (Path(question["config_dir"]) / "sessions").glob("*.json"):
         try:
             data = json.loads(path.read_text())
             if not isinstance(data, dict) or data.get("sessionId") != session:
+                continue
+            if statuses is not None and data.get("status") not in statuses:
                 continue
             # Host and container can share session files and have overlapping PIDs.
             if data.get("pidDomain") != domain:
@@ -56,14 +59,24 @@ def claude_status(question, pane_pid):
                 parent, _ = process(pid)
             if str(pid) != pane_pid:
                 continue
-            if data.get("status") == "waiting":
-                return "waiting"
-            # A busy value from before PermissionRequest is not an answer.
+            return data
+        except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def claude_status(question, pane_pid):
+    data = claude_session(question, pane_pid)
+    if data:
+        if data.get("status") == "waiting":
+            return "waiting"
+        # A busy value from before PermissionRequest is not an answer.
+        try:
             if (data.get("status") in ("busy", "idle")
                     and float(data["statusUpdatedAt"]) >= question["received"] * 1000):
                 return "answered"
-        except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError):
-            continue
+        except (ValueError, KeyError, TypeError):
+            pass
     return "unknown"
 
 

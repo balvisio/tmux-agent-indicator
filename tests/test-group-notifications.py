@@ -329,6 +329,119 @@ class CompletionTest(unittest.TestCase):
         self.assertTrue(all(r['phase'] == 'completed' for r in self.n.reviews.values()))
 
 
+class ClaudeShellTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix='claude-shell-')
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / 'projects' / 'fixture' / 'host.jsonl'
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('')
+        self.live = {'%1': dict(pid='101', window='@1', host='', state='idle'),
+                     '%2': dict(pid='102', window='@1', host='%1', state='idle')}
+        self.n = module.Notifications({}, self.live)
+        self.event('running', 'UserPromptSubmit', 'human', 1)
+        self.n.handoff(dict(action='skip', host='%1', host_pid='101', reviewer='%2',
+                            session_id='host', prompt_id='human'))
+        self.event('done', 'Stop', 'human', 2)
+        self.n.completions()
+        self.row('shell', '<bash-input>printf fixture</bash-input>', 3)
+        self.row('shell', '<bash-stdout>fixture</bash-stdout>', 4)
+        self.native = dict(status='busy', statusUpdatedAt=3000)
+        mocked = patch.object(module.input_status, 'claude_session', return_value=self.native)
+        self.reader = mocked.start()
+        self.addCleanup(mocked.stop)
+
+    def event(self, state, event, turn, at):
+        return self.n.state('%1', 'claude', state,
+            dict(payload('host', turn, event), received_at=at, transcript_path=str(self.path),
+                 claude_config_dir=self.directory.name))
+
+    def row(self, prompt, content, at, session='host'):
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(dict(type='user', sessionId=session, promptId=prompt,
+                timestamp=module.datetime.fromtimestamp(at, module.datetime.now().astimezone().tzinfo).isoformat(),
+                message=dict(content=content))) + '\n')
+
+    def test_sweep_tracks_continuation_and_stop_without_reserving_review(self):
+        self.row('shell', [dict(type='tool_result', tool_use_id='one')], 5)
+        self.assertEqual(self.n.shell_activity(), [('%1', 'claude', 'running', False)])
+        self.assertEqual(self.n.panes['%1']['turn'], 'host:shell')
+        self.assertFalse(self.n.completions())
+        self.assertEqual(len(self.n.reviews), 1)
+        self.assertFalse(self.event('done', 'Stop', 'human', 6))
+        self.assertEqual(self.n.panes['%1']['state'], 'running')
+        self.assertTrue(self.event('done', 'Stop', 'shell', 7))
+        self.assertEqual(len(self.n.completions()), 1)
+        self.event('done', 'Stop', 'shell', 8)
+        self.assertFalse(self.n.completions())
+        self.native['statusUpdatedAt'] = 9000
+        self.assertFalse(self.n.shell_activity())
+
+    def test_short_shell_stop_can_arrive_before_sweep(self):
+        self.assertTrue(self.event('done', 'Stop', 'shell', 6))
+        self.assertEqual(self.n.panes['%1']['turn'], 'host:shell')
+        self.assertEqual(len(self.n.completions()), 1)
+        self.assertEqual(len(self.n.reviews), 1)
+
+    def test_shell_permission_is_not_discarded_as_stale(self):
+        self.assertTrue(self.event('needs-input', 'PermissionRequest', 'shell', 6))
+        self.assertEqual(self.n.panes['%1']['state'], 'needs-input')
+        self.assertFalse(self.n.completions())
+        self.assertFalse(self.n.shell_activity())
+
+    def test_interrupt_before_or_after_sweep_cannot_revive_work(self):
+        for observed in (False, True):
+            with self.subTest(observed=observed):
+                if observed:
+                    self.n.panes['%1']['event_at'] = 2
+                    self.n.shell_activity()
+                self.n.state('%1', 'claude', 'off', dict(received_at=6))
+                self.native['statusUpdatedAt'] = 7000
+                self.assertFalse(self.n.shell_activity())
+                self.assertFalse(self.event('done', 'Stop', 'shell', 8))
+                self.assertFalse(self.n.completions())
+                self.assertEqual(self.n.panes['%1']['state'], 'off')
+
+    def test_newer_human_submission_wins_even_before_transcript_write(self):
+        self.event('running', 'UserPromptSubmit', 'new-human', 6)
+        self.event('done', 'Stop', 'new-human', 7)
+        self.native['statusUpdatedAt'] = 8000
+        self.assertFalse(self.n.shell_activity())
+        self.assertFalse(self.event('done', 'Stop', 'shell', 9))
+        self.assertEqual(self.n.panes['%1']['turn'], 'host:new-human')
+
+    def test_native_status_must_be_new_and_busy(self):
+        for status, updated in [('idle', 3000), ('waiting', 3000), ('busy', 1000), ('busy', float('nan'))]:
+            with self.subTest(status=status, updated=updated):
+                self.native.update(status=status, statusUpdatedAt=updated)
+                self.assertFalse(self.n.shell_activity())
+
+    def test_missing_transcript_path_uses_unambiguous_session_file(self):
+        self.n.panes['%1']['claude'].pop('transcript')
+        self.assertTrue(self.n.shell_activity())
+
+    def test_newer_prompt_or_wrong_session_is_not_a_shell_continuation(self):
+        for session in ('host', 'another'):
+            with self.subTest(session=session):
+                self.row('new', 'ordinary user prompt', 5, session)
+                self.assertFalse(self.n.shell_activity())
+                self.assertFalse(self.event('done', 'Stop', 'shell', 6))
+
+    def test_partial_tail_and_finished_shell_do_not_revive_work(self):
+        original = self.path.read_text()
+        self.path.write_text(original + '{"type":')
+        self.assertFalse(self.n.shell_activity())
+        self.path.write_text(original + json.dumps(dict(type='system', subtype='stop_hook_summary')) + '\n')
+        self.assertFalse(self.n.shell_activity())
+        # A Stop deferred behind the state lock can arrive after its summary.
+        self.assertTrue(self.event('done', 'Stop', 'shell', 6))
+
+    def test_reader_never_searches_unbounded_history(self):
+        with self.path.open('a') as stream:
+            stream.write(json.dumps(dict(type='assistant', padding='x' * (1024 * 1024))) + '\n')
+        self.assertFalse(self.n.shell_activity())
+
+
 class StorageIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix='notification-storage-')
@@ -364,6 +477,53 @@ class StorageIntegrationTest(unittest.TestCase):
 
     def tracking(self):
         return json.loads(self.tmux('show-option', '-gqv', module.OPTION))
+
+    def test_native_shell_continuation_repairs_color_and_completes_once(self):
+        self.tmux('set', '-g', '@agent-indicator-running-window-title-bg', 'yellow')
+        self.tmux('set', '-g', '@agent-indicator-running-window-title-fg', 'black')
+        pane_pid = self.tmux('display-message', '-p', '-t', self.host, '#{pane_pid}')
+        _parent, started = module.input_status.process(int(pane_pid))
+        config = self.tmp / '.claude'
+        sessions = config / 'sessions'
+        sessions.mkdir(parents=True)
+        transcript = self.tmp / 'shell.jsonl'
+        data = dict(session_id='fixture', prompt_id='human', hook_event_name='UserPromptSubmit',
+                    transcript_path=str(transcript))
+        self.hook(self.host, 'running', data)
+        self.hook(self.host, 'done', dict(data, hook_event_name='Stop'))
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        sequence = self.tracking()['windows'][self.window]['sequence']
+        now = time.time()
+        transcript.write_text(json.dumps(dict(type='user', sessionId='fixture', promptId='shell',
+            timestamp=module.datetime.now().astimezone().isoformat(),
+            message=dict(content='<bash-input>printf fixture</bash-input>'))) + '\n')
+        native = dict(sessionId='fixture', pid=int(pane_pid), procStart=started,
+                      pidDomain=module.input_status.pid_domain(), status='busy', statusUpdatedAt=now * 1000)
+        session_file = sessions / (pane_pid + '.json')
+        session_file.write_text(json.dumps(native))
+        def sweep():
+            subprocess.run([str(ROOT/'scripts/window-state.sh'), '--notifications'], env=self.env,
+                           capture_output=True, check=True, timeout=20)
+        # A shared HOME or reused PID cannot supply another process's status.
+        session_file.write_text(json.dumps(dict(native, pidDomain='wrong-namespace')))
+        sweep()
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        session_file.write_text(json.dumps(native))
+        sweep()
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        self.assertIn('bg=yellow', self.tmux('show-option', '-wqv', 'window-status-style'))
+        self.assertFalse(self.tracking()['windows'][self.window]['ready'])
+        self.assertEqual(self.tracking()['windows'][self.window]['sequence'], sequence)
+        self.hook(self.host, 'done', dict(data, hook_event_name='Stop'))  # delayed old completion
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        data.update(prompt_id='shell', hook_event_name='Stop')
+        self.hook(self.host, 'done', data)
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        self.assertEqual(self.tracking()['windows'][self.window]['sequence'], sequence + 1)
+        self.hook(self.host, 'done', data)
+        sweep()  # stale busy status must not revive a completed shell turn
+        self.assertEqual(self.tracking()['windows'][self.window]['sequence'], sequence + 1)
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
 
     def test_large_history_preserves_grace_and_grouped_completion(self):
         reviewer = self.tmux('split-window', '-d', '-P', '-F', '#{pane_id}',

@@ -753,6 +753,12 @@ Prompt submission uses a single `running` update, which replaces the previous pa
 the same lock. Claude runs matching hooks in parallel, so a separate `off` hook could finish last
 and incorrectly clear an active turn. Reinstalling replaces older plugin hook entries with this template.
 
+Claude's `!` shell commands can continue into an agent response without firing `UserPromptSubmit`.
+The presence sweep recognizes that work from Claude's live session status and the newest shell
+submission in its transcript, then tracks its completion normally. This can take one sweep (normally
+five seconds). Old completions and interrupted commands cannot restart the indicator, and a local
+shell command does not create a Kibitz review expectation.
+
 Codex hooks must be reviewed and trusted with `/hooks` before they can run.
 
 Claude does not fire `Stop` when a turn is interrupted. The tmux plugin binds Ctrl+C to forward

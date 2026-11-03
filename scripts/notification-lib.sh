@@ -67,7 +67,7 @@ reconcile_notifications() {
             notification_silent=true
             continue
         fi
-        if [ "$pane" = INPUT ]; then
+        if [ "$pane" = INPUT ] || [ "$pane" = ACTIVITY ]; then
             if apply_agent_state "$agent" "$input_agent" "$input_state" "$input_pid"; then
                 sync_animation
                 if [ "$input_notify" = 1 ]; then

@@ -5,6 +5,7 @@ Only IDs and message digests are stored in tmux, never conversation text.
 A review reservation survives delivery and is released by its matching turn.
 """
 from collections import Counter
+from datetime import datetime
 import hashlib
 import importlib.util
 import json
@@ -35,7 +36,8 @@ def message_hash(text):
 
 def hook_data(payload):
     result = {key: payload.get(key, "") for key in
-              ("session_id", "prompt_id", "turn_id", "hook_event_name", "tool_use_id", "call_id")}
+              ("session_id", "prompt_id", "turn_id", "hook_event_name", "tool_use_id", "call_id",
+               "transcript_path")}
     result["received_at"] = input_status.time.time()
     result["claude_config_dir"] = os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
     prompt = payload.get("prompt") or ""
@@ -51,6 +53,44 @@ def hook_data(payload):
                 intervals.add((start, end))
     result["message_hashes"] = [message_hash(prompt[start:end]) for start, end in sorted(intervals)]
     return result
+
+
+def latest_shell_prompt(path, session, unfinished=False):
+    """Find a current Claude ! command, never an older command in scrollback.
+
+    Shell submissions bypass UserPromptSubmit. Read a bounded, complete tail;
+    tool results and shell output may follow the input with the same prompt ID.
+    Missing evidence is not permission to replace the tracked turn.
+    """
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            start = max(0, stream.tell() - 1024 * 1024)
+            stream.seek(start)
+            if start:
+                stream.readline()
+            tail = stream.read()
+        if not tail.endswith(b"\n"):
+            return None
+        prompt = None
+        for line in reversed(tail.splitlines()):
+            row = json.loads(line)
+            if unfinished and row.get("type") == "system" and row.get("subtype") == "stop_hook_summary":
+                return None
+            if row.get("type") != "user" or not row.get("promptId"):
+                continue
+            if row.get("sessionId") != session or row.get("isSidechain"):
+                return None
+            prompt = prompt or row["promptId"]
+            if row["promptId"] != prompt:
+                return None
+            content = row.get("message", {}).get("content")
+            if isinstance(content, str) and content.startswith("<bash-input>"):
+                started = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")).timestamp()
+                return prompt, started
+        return None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 class Notifications:
@@ -125,6 +165,56 @@ class Notifications:
         current.update(state="running", turn=turn, last_done="")
         self.windows[self.live[pane]["window"]]["pending"].pop(pane, None)
 
+    def shell_turn(self, pane, context, unfinished=False):
+        current = self.panes[pane]
+        session = context.get("session", "")
+        if not session or current["turn"].split(":", 1)[0] != session:
+            return None
+        path = context.get("transcript", "")
+        if not path:
+            # Sessions already running when the plugin is installed may not
+            # have supplied a transcript path yet. Require an unambiguous file.
+            if not re.fullmatch(r"[a-zA-Z0-9-]+", session):
+                return None
+            paths = list((Path(context["config_dir"]) / "projects").glob(f"*/{session}.jsonl"))
+            if len(paths) != 1:
+                return None
+            path = str(paths[0])
+        latest = latest_shell_prompt(path, session, unfinished)
+        if not latest:
+            return None
+        prompt, started = latest
+        turn = session + ":" + prompt
+        if (turn in (current["turn"], current["last_done"], current.get("cancelled_turn"))
+                or started <= current.get("event_at", 0)):
+            return None
+        return turn
+
+    def shell_activity(self):
+        """Recover !-command continuations without an extra hook per tool call."""
+        changes = []
+        for pane, current in self.panes.items():
+            if current["agent"] != "claude" or current["state"] not in ("idle", "done", "off"):
+                continue
+            context = current.get("claude", dict(session=current["turn"].split(":", 1)[0],
+                config_dir=os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))))
+            try:
+                native = input_status.claude_session(context, self.live[pane]["pid"], {"busy"})
+                if not native or native.get("status") != "busy":
+                    continue
+                updated = float(native["statusUpdatedAt"]) / 1000
+                if not math.isfinite(updated) or updated <= current.get("event_at", 0):
+                    continue
+                turn = self.shell_turn(pane, context, unfinished=True)
+                if not turn:
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            self.begin(pane, turn)
+            current.update(observed=True, event_at=updated, claude=context)
+            changes.append((pane, "claude", "running", False))
+        return changes
+
     def state(self, pane, agent, state, payload):
         if pane not in self.live:
             return
@@ -137,6 +227,16 @@ class Notifications:
         event = payload.get("hook_event_name", "")
         if state == "done" and turn and current.get("cancelled_turn") == turn:
             return False
+        context = dict(session=session,
+                       config_dir=payload.get("claude_config_dir", str(Path.home() / ".claude")),
+                       transcript=payload.get("transcript_path", ""))
+        # A short shell continuation may finish before the sweep sees it. Its
+        # permission/Stop hook may adopt only the latest, newer shell prompt;
+        # never reserve a Kibitz review for a local shell command.
+        if (agent == "claude" and turn and turn != current["turn"]
+                and event in ("PermissionRequest", "PostToolUse", "Stop")
+                and self.shell_turn(pane, context) == turn):
+            self.begin(pane, turn)
         if state == "running" and event == "UserPromptSubmit":
             if turn and current["last_done"] == turn:
                 return False
@@ -197,6 +297,10 @@ class Notifications:
             self.windows[self.live[pane]["window"]]["pending"].pop(pane, None)
         current["state"] = state
         current["observed"] = True
+        if agent == "claude":
+            current["event_at"] = max(current.get("event_at", 0), payload.get("received_at", input_status.time.time()))
+            if session:
+                current["claude"] = context
         return True
 
     def handoff(self, message):
@@ -331,6 +435,9 @@ def main():
         tracker.acknowledge(sys.argv[2])
     elif action == "input":
         input_changes = questions.observed(*sys.argv[2:9])
+    activity_changes = []
+    if action == "sweep" and option("@agent-indicator-running-enabled", "on").lower() in ("on", "true", "yes", "1"):
+        activity_changes = tracker.shell_activity()
     if option("@agent-indicator-needs-input-enabled", "on").lower() in ("on", "true", "yes", "1"):
         input_changes.extend(questions.check())
     else:
@@ -377,6 +484,8 @@ def main():
                 pass  # The sweep checks the question if its reader cannot start.
     for pane, agent, state, notify in input_changes:
         print("INPUT", pane, agent, state, int(notify), live[pane]["pid"])
+    for pane, agent, state, notify in activity_changes:
+        print("ACTIVITY", pane, agent, state, int(notify), live[pane]["pid"])
     if action == "state" and apply_state is not False:
         print("STATE", tracker.panes[sys.argv[2]]["state"])
         if questions.silent:
