@@ -56,7 +56,8 @@ duplicate questions, interruption, timer replacement, and yellow/magenta styles 
 On macOS, the status fixtures use UTC process timestamps while readers run in other time zones.
 Codex fixtures render dialogs and the working composer in isolated tmux panes. They check that a
 missed dialog stays yellow and silent, while an unanswered dialog alerts once after the grace.
-Recognition checks include a screen read crossing the deadline. Process inspection must be
+Recognition checks include a screen read crossing the deadline and history navigation with a hidden
+cursor: an answered question stays yellow and silent, while approval dialogs still win. Process inspection must be
 allowed inside the test panes. No personal startup files, agent settings, or running sessions change.
 Queued Codex approval fixtures change the visible command without emitting another permission hook.
 They verify a fresh grace period for the new dialog, silence for a quick answer, and one alert for an

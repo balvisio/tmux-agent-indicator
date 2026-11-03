@@ -74,15 +74,29 @@ def codex_screen(text, cursor_y, cursor_visible):
     if ("enter to confirm" in footer and "esc to cancel" in footer
             or "enter to submit" in footer and "esc to interrupt" in footer):
         return "waiting"
-    if not cursor_visible or not 0 <= cursor_y < len(lines):
+    if not 0 <= cursor_y < len(lines):
         return "unknown"
+    working = r"\([^()]*\b\d+[smh][^()]*[•·]\s*esc to interrupt\)"
+    if not cursor_visible:
+        # History navigation hides the cursor at the live working status while
+        # leaving the composer below it. Other hidden-cursor views stay unknown.
+        navigation = "↑ previous · ↓ next · enter details · esc back"
+        if (not any(line.strip() == navigation for line in lines[-5:])
+                or not re.search(working, lines[cursor_y])):
+            return "unknown"
+        composers = [i for i in range(max(cursor_y + 1, len(lines) - 6), len(lines))
+                     if lines[i].lstrip().startswith("› ")
+                     and not re.match(r"›\s+\d+\.", lines[i].lstrip())]
+        if len(composers) != 1:
+            return "unknown"
+        cursor_y = composers[0]
     composer = lines[cursor_y].lstrip()
     if not composer.startswith("› ") or re.match(r"›\s+\d+\.", composer):
         return "unknown"
     # The working status belongs above the normal composer. Question footers
     # also mention interrupt, but appear below their input instead.
     above = " ".join(lines[max(0, cursor_y - 6):cursor_y])
-    if re.search(r"\([^()]*\b\d+[smh][^()]*[•·]\s*esc to interrupt\)", above):
+    if re.search(working, above):
         return "answered"
     return "unknown"
 

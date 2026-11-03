@@ -171,6 +171,27 @@ class QuestionsTest(unittest.TestCase):
                 self.assertEqual(status.status(question, "%1", {"pid": "42"},
                                                lambda *args: "codex|0|3|1|42|tty"), ("answered", ""))
 
+    def test_codex_working_history_navigation_with_hidden_cursor(self):
+        screen = ("Earlier output\n\n• Working (1h 43m 15s • esc to interrupt)\n"
+                  "  └ Tip: Example hint\nNew activity · ↓ Back to bottom · esc\n\n"
+                  "› Ask Codex to do anything\n\nmodel · directory\n"
+                  "↑ previous · ↓ next · enter details · esc back\n")
+        self.assertEqual(status.codex_screen(screen, 2, False), "answered")
+        for changed, cursor in ((screen.replace('enter details', 'unknown dialog'), 2),
+                                (screen, 0), (screen.replace('› Ask Codex', '› 1. Yes'), 2)):
+            self.assertEqual(status.codex_screen(changed, cursor, False), "unknown")
+        waiting = screen + "Press enter to confirm or esc to cancel\n"
+        self.assertEqual(status.codex_screen(waiting, 2, False), "waiting")
+        question = dict(agent="codex", deadline=13, seen_waiting=False)
+        with patch.object(status.subprocess, "check_output", return_value=screen):
+            for now, expected in ((12.9, "unknown"), (13, "answered")):
+                with patch.object(status.time, "monotonic", return_value=now):
+                    self.assertEqual(status.status(question, "%1", {"pid": "42"},
+                        lambda *args: "codex|0|2|0|42|tty"), (expected, ""))
+            with patch.object(status.time, "monotonic", return_value=14):
+                self.assertEqual(status.status(question, "%1", {"pid": "42"},
+                    lambda *args: "codex|1|2|0|42|tty"), ("unknown", ""))
+
     def test_codex_unanswered_or_unreadable_screen_does_not_clear_at_deadline(self):
         question = dict(agent="codex", deadline=13, seen_waiting=False)
         cases = [("codex|0|0|0|42|tty", "Press enter to confirm or esc to cancel\n", "waiting"),
@@ -340,6 +361,9 @@ paint() {
     case "$(cat "$root/codex-screen")" in
         working)
             printf '\033[2J\033[H\033[?25h\033[20;1HWorking (34s • esc to interrupt)\033[22;1H› Ask Codex to do anything\033[24;1Hmodel · directory\033[22;3H'
+            ;;
+        working-history)
+            printf '\033[2J\033[H\033[?25l\033[20;1HWorking (34s • esc to interrupt)\033[21;1HNew activity · ↓ Back to bottom · esc\033[22;1H› Ask Codex to do anything\033[23;1Hmodel · directory\033[24;1H↑ previous · ↓ next · enter details · esc back\033[20;1H'
             ;;
         waiting)
             printf '\033[2J\033[H\033[?25l\033[20;1HWould you like to run the following command?\033[22;1H› 1. Yes, proceed (y)\033[24;1HPress enter to confirm or esc to cancel'
@@ -512,6 +536,16 @@ class TmuxTest(unittest.TestCase):
         self.sweep()
         self.assertEqual(self.state(), "running")
         self.assertEqual(self.bells(), ["needs-input"])
+
+    def test_codex_answer_in_history_navigation_stays_yellow_and_silent(self):
+        self.codex_fixture()
+        self.codex_action("question", "working-history")
+        self.assertEqual(self.tmux("display-message", "-p", "-t", self.pane, "#{cursor_flag}"), "0")
+        self.assertEqual(self.state(), "running")
+        self.wait(lambda: not self.question_record())
+        self.sweep()
+        self.assertEqual(self.state(), "running")
+        self.assertFalse(self.bells())
 
     def test_fast_accept_stays_yellow_without_tool_completion(self):
         self.native("waiting")
