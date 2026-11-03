@@ -497,6 +497,48 @@ class StorageIntegrationTest(unittest.TestCase):
         self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
         self.assertFalse(self.bells.exists())
 
+    def test_unrecorded_submission_does_not_hold_muted_replacement_yellow(self):
+        kibitz = Path(os.environ.get('KIBITZ_TEST_REPO', ROOT.parent / 'kibitz'))
+        if not (kibitz/'hooks/kibitz_notifications.py').exists():
+            self.skipTest('set KIBITZ_TEST_REPO')
+        reviewer = self.tmux('split-window', '-d', '-P', '-F', '#{pane_id}',
+                             '/bin/bash --noprofile --norc')
+        self.tmux('set', '-p', '-t', reviewer, '@kibitz_host_pane', self.host)
+        self.tmux('set', '-p', '-t', reviewer, '@name', 'codex')
+        transcript = self.tmp/'transcript.jsonl'
+        anchor = dict(type='assistant', uuid='anchor', message={'content': 'previous reply'})
+        transcript.write_text(json.dumps(anchor)+'\n')
+        data = dict(session_id='host', prompt_id='unrecorded', prompt='summarize',
+                    hook_event_name='UserPromptSubmit', transcript_path=str(transcript))
+        def run(name):
+            subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
+                           env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
+                           text=True, check=True, capture_output=True, timeout=20)
+        run('kibitz_hook_user_prompt_submit.py')
+        self.hook(self.host, 'running', data)
+        # The abandoned submission has neither a transcript entry nor a Stop.
+        data.update(prompt_id='replacement', prompt='summarize /mute')
+        run('kibitz_hook_user_prompt_submit.py')
+        self.hook(self.host, 'running', data)
+        with transcript.open('a') as stream:
+            stream.write(json.dumps(dict(type='user', uuid='new', parentUuid='anchor',
+                promptId='replacement', message={'content': data['prompt']}))+'\n')
+        data.update(hook_event_name='Stop', last_assistant_message='summary', background_tasks=[])
+        self.hook(self.host, 'done', data)
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        self.assertFalse(self.bells.exists())
+        run('kibitz_hook_stop.py')
+        self.assertEqual(self.tracking()['reviews'][module.exchange_id('host', 'unrecorded')]['phase'], 'cancelled')
+        self.assertFalse(self.tracking()['windows'][self.window]['review_pending'])
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        for _ in range(50):
+            if self.bells.exists():
+                break
+            time.sleep(.02)
+        self.assertEqual(self.bells.read_text(), 'done\n')
+        run('kibitz_hook_stop.py')
+        self.assertEqual(self.bells.read_text(), 'done\n')
+
 
 class HookIntegrationTest(unittest.TestCase):
     def test_real_hook_scripts_share_one_completion_event(self):
