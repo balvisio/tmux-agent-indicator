@@ -273,8 +273,9 @@ python3 -c 'print("Claude: \uec82  OpenAI: \uec81")'
 ```
 
 The OpenAI logo can represent Codex. These are monochrome font glyphs and follow the text colour.
-The shipped window labels use these logos. Install the font on the computer displaying the terminal,
-including for remote SSH sessions; it is not needed on the remote host.
+The shipped window labels and Hammerspoon's window menu use these logos. The menu uses Symbols Nerd
+Font Mono for the logos and the system font for conversation names. Install the font on the computer
+displaying the terminal, including for remote SSH sessions; it is not needed on the remote host.
 See [iTerm2 font settings](https://iterm2.com/documentation-preferences-profiles-text.html) and
 [VS Code terminal fonts](https://code.visualstudio.com/docs/terminal/appearance#_text-style).
 

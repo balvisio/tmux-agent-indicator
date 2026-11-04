@@ -926,8 +926,29 @@ local function menuTextAttrs()
     return { font = font, color = { hex = (ok and style == "Dark") and "#FFFFFF" or "#000000" } }
 end
 
-local function entry(text, w, attrs)
-    return hs.styledtext.new(text .. " — ", attrs)
+local function entry(w, attrs)
+    local text = hs.styledtext.new(("%d: "):format(w.index), attrs)
+    local name, logos = w.label, {}
+    local glyphs = { ["🤖"] = "", ["🧠"] = "" }
+    -- Convert only the agent prefix; an emoji in a conversation name stays literal.
+    while true do
+        local matched = false
+        for icon, glyph in pairs(glyphs) do
+            if name:sub(1, #icon) == icon then
+                logos[#logos + 1] = glyph
+                name = name:sub(#icon + 1)
+                matched = true
+                break
+            end
+        end
+        if not matched then break end
+    end
+    if #logos > 0 then
+        text = text .. hs.styledtext.new(table.concat(logos, " ") .. " ", {
+            font = { name = "SymbolsNFM", size = attrs.font.size }, color = attrs.color })
+        name = name:gsub("^%s+", "")
+    end
+    return text .. hs.styledtext.new(name .. " — ", attrs)
         .. hs.styledtext.new("●", { color = { hex = w.color }, font = attrs.font })
         .. hs.styledtext.new(" " .. w.state, attrs)
 end
@@ -956,7 +977,7 @@ local function menu()
     local attrs = menuTextAttrs()
     local windows = agentWindows()
     for _, w in ipairs(windows or {}) do
-        table.insert(items, { title = entry(("%d: %s"):format(w.index, w.label), w, attrs), fn = jumpTo(w) })
+        table.insert(items, { title = entry(w, attrs), fn = jumpTo(w) })
     end
     if not windows then
         table.insert(items, { title = "tmux is not running", disabled = true })
@@ -984,7 +1005,7 @@ local function menu()
         for _, g in ipairs(groups) do
             table.insert(items, { title = segmentName(seg, g, KIND_NAME[seg.kind]), disabled = true })
             for _, w in ipairs(g.windows) do
-                table.insert(items, { title = entry(("%d: %s"):format(w.index, w.label), w, attrs),
+                table.insert(items, { title = entry(w, attrs),
                                       fn = jumpRemote(seg, w), indent = 1 })
             end
         end
