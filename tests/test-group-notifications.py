@@ -50,6 +50,48 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(len(self.state('%1', 'done')), 1)
         self.assertFalse(self.state('%1', 'done'))
 
+    def test_transient_codex_hooks_cannot_replace_the_visible_review(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.state('%1', 'done')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        self.state('%2', 'needs-input', 'r1', 'reviewer')
+        before = json.dumps(self.data, sort_keys=True)
+        for event, state in [('UserPromptSubmit', 'running'), ('PermissionRequest', 'needs-input'),
+                             ('Stop', 'done'), ('Interrupt', 'off'), ('SessionEnd', 'off')]:
+            p = module.hook_data(dict(session_id='internal-helper', turn_id='helper-turn',
+                                      hook_event_name=event, transcript_path=None))
+            self.assertFalse(self.n.state('%2', 'codex', state, p))
+            self.assertEqual(json.dumps(self.data, sort_keys=True), before)
+            self.assertFalse(self.n.completions())
+        self.n.state('%2', 'codex', 'running', payload('reviewer', 'r1', 'PostToolUse'))
+        self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+
+    def test_transient_codex_hook_cannot_claim_an_unobserved_pane(self):
+        p = module.hook_data(dict(session_id='helper', turn_id='helper-turn',
+                                  hook_event_name='UserPromptSubmit', transcript_path=None))
+        before = json.dumps(self.data, sort_keys=True)
+        self.assertFalse(self.n.state('%1', 'codex', 'running', p))
+        self.assertEqual(json.dumps(self.data, sort_keys=True), before)
+
+    def test_transient_hook_returns_silently_before_tmux_or_lock_access(self):
+        with tempfile.TemporaryDirectory(prefix='transient-hook-') as directory:
+            root = Path(directory)
+            marker = root / 'called'
+            command = root / 'tmux'
+            command.write_text('#!/bin/sh\ntouch '+shlex.quote(str(marker))+'\nexit 9\n')
+            command.chmod(0o755)
+            env = dict(PATH=str(root)+os.pathsep+os.environ['PATH'], HOME=directory,
+                       TMUX='fixture,1,0', TMUX_PANE='%1')
+            for state in ('running', 'needs-input', 'done', 'off'):
+                result = subprocess.run([str(ROOT/'scripts/agent-state.sh'), '--hook', '--agent',
+                    'codex', '--state', state], input=json.dumps(dict(session_id='helper',
+                    turn_id='turn', hook_event_name='Stop', transcript_path=None)),
+                    env=env, text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout + result.stderr, '')
+            self.assertFalse(marker.exists())
+
     def test_unrelated_agents_wait_for_each_other(self):
         self.live['%2']['host'] = ''
         self.state('%1', 'running')

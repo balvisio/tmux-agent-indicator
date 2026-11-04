@@ -762,6 +762,10 @@ shell command does not create a Kibitz review expectation.
 
 Codex hooks must be reviewed and trusted with `/hooks` before they can run.
 
+Internal Codex threads can share the terminal process and emit hooks. The indicator ignores hooks
+with an explicitly null `transcript_path`, so a transient helper cannot replace the visible
+conversation's colour, completion, or recovery identity. Non-persisted Codex sessions are not tracked.
+
 Claude does not fire `Stop` when a turn is interrupted. The tmux plugin binds Ctrl+C to forward
 the key normally, then clear `running` or `needs-input` state in that Claude pane. It preserves
 custom Ctrl+C bindings; if you have one, append

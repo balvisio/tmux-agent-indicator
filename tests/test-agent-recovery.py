@@ -57,6 +57,15 @@ with open(os.environ['RECOVERY_LOG'], 'a') as out:
         'args': sys.argv[1:], 'reviewer': reviewer, 'pair': pair}) + '\\n')
 event = {'session_id': session, 'cwd': os.getcwd(), 'hook_event_name': 'SessionStart'}
 subprocess.run([os.environ['RECOVERY_SCRIPT'], 'hook', kind], input=json.dumps(event), text=True, check=True)
+if kind == 'codex':
+    # Internal threads inherit the visible CLI's process ancestry and hooks.
+    # Their null transcript must not replace its resumable conversation.
+    for event_name in ('SessionStart', 'UserPromptSubmit', 'SessionEnd'):
+        helper = dict(event, session_id='transient-helper', transcript_path=None, hook_event_name=event_name)
+        subprocess.run([os.environ['RECOVERY_SCRIPT'], 'hook', kind], input=json.dumps(helper), text=True, check=True)
+        saved = subprocess.check_output(['tmux', 'show-option', '-pqv', '-t', os.environ['TMUX_PANE'],
+            '@agent_recovery'], text=True)
+        assert json.loads(saved)['session'] == session, saved
 while True: time.sleep(1)
 '''
         for name in ("claude", "codex"):

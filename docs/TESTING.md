@@ -368,3 +368,8 @@ partial transcript, or already-finished shell must not revive work. A short cont
 before the sweep still completes once, without reserving a Kibitz review. For a manual check, finish
 a normal Claude turn, run a harmless `!` command, and let Claude respond to its output. Check yellow
 during a long response and completion afterward, then repeat with Ctrl+C.
+
+Transient Codex threads must not claim the terminal's state: the grouping tests interleave helper
+hooks with a visible review waiting for input, and verify no state, review, or completion changes.
+The recovery fixture emits helper SessionStart, UserPromptSubmit, and SessionEnd hooks from the same
+Codex process and checks that the visible conversation remains the saved recovery target.

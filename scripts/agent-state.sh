@@ -111,7 +111,8 @@ case "$if_state" in
 esac
 
 if [ "$hook" = true ] && [ "$locked" = false ] && [ ! -t 0 ]; then
-    TMUX_AGENT_HOOK_DATA=$(python3 "$script_dir/notification-state.py" hook-data)
+    TMUX_AGENT_HOOK_DATA=$(python3 "$script_dir/notification-state.py" hook-data "$agent")
+    [ -n "$TMUX_AGENT_HOOK_DATA" ] || exit 0
     export TMUX_AGENT_HOOK_DATA
 fi
 

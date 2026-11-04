@@ -55,6 +55,13 @@ def hook_data(payload):
     return result
 
 
+def terminal_hook(agent, payload):
+    # Internal Codex threads can share the TUI process and invoke its hooks.
+    # An explicitly null transcript identifies a non-persisted thread, not a
+    # terminal conversation. Never let it claim the pane or complete its turn.
+    return not (agent == "codex" and payload.get("transcript_path", "") is None)
+
+
 def latest_shell_prompt(path, session, unfinished=False):
     """Find a current Claude ! command, never an older command in scrollback.
 
@@ -218,6 +225,8 @@ class Notifications:
     def state(self, pane, agent, state, payload):
         if pane not in self.live:
             return
+        if not terminal_hook(agent, payload):
+            return False
         current = self.panes[pane]
         current["agent"] = agent
         session = payload.get("session_id", "")
@@ -397,7 +406,9 @@ def main():
         sys.stdout.write("__SNAPSHOT_OK__\0\0")
         return
     if sys.argv[1] == "hook-data":
-        print(json.dumps(hook_data(json.load(sys.stdin)), separators=(",", ":")))
+        payload = hook_data(json.load(sys.stdin))
+        if terminal_hook(sys.argv[2], payload):
+            print(json.dumps(payload, separators=(",", ":")))
         return
     # The Bash parent owns the record lock while this child reads/writes tmux.
     os.fstat(9)

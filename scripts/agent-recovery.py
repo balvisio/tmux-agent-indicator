@@ -166,6 +166,8 @@ def record(agent, args):
         event = json.load(sys.stdin)
         if event.get("agent_id"):
             return  # In-process subagents must not replace the terminal conversation.
+        if agent == "codex" and event.get("transcript_path", "") is None:
+            return  # Transient helper threads share the TUI process but cannot be resumed.
         if event.get("hook_event_name") == "SessionEnd":
             request_save()
             return
