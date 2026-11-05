@@ -349,6 +349,10 @@ reservation for the wakeup. Codex tool yields must not complete the review befor
 Cancellation tests distinguish abandoned reservations from dispatched reviews and preserve a newer
 turn's completion. Kibitz's handoff tests cover replaced prompts, successful and failed TaskStop calls,
 remaining background work, and retrying a failed cancellation.
+Attached task-completion tests keep the receiving turn's review pending, retire the older
+undispatched reservation only with terminal evidence for every task, and check both Stop-hook
+orders. The window stays yellow and silent until the receiving turn's reviewer finishes, then
+publishes one completion. A task still reported as running prevents retirement.
 `tests/test-hammerspoon-dots.py` checks remote completion event delivery and duplicate window listings.
 
 For a manual check, update both plugins and trust the indicator hooks in Codex. Submit a prompt to a

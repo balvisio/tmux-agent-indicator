@@ -639,7 +639,7 @@ class StorageIntegrationTest(unittest.TestCase):
             subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
                            env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
                            text=True, check=True, capture_output=True, timeout=20)
-        for number, kind in enumerate(('replacement', 'TaskStop'), 1):
+        for number, kind in enumerate(('replacement', 'TaskStop', 'attachment'), 1):
             old, new = kind+'-old', kind+'-new'
             entries = [dict(type='user', promptId=old, uuid=old, parentUuid='anchor',
                             message={'content': 'old question'})]
@@ -647,7 +647,7 @@ class StorageIntegrationTest(unittest.TestCase):
                         hook_event_name='UserPromptSubmit', transcript_path=str(transcript))
             run('kibitz_hook_user_prompt_submit.py', data)
             self.hook(self.host, 'running', data)
-            if kind == 'TaskStop':
+            if kind in ('TaskStop', 'attachment'):
                 entries.append(dict(type='user', toolUseResult={'backgroundTaskId':'task'},
                                     message={'content': []}))
             self.hook(self.host, 'done', dict(data, hook_event_name='Stop'))
@@ -661,6 +661,11 @@ class StorageIntegrationTest(unittest.TestCase):
                     dict(type='user', message={'content':[dict(type='tool_result', tool_use_id='stop',
                         is_error=False)]}, toolUseResult={'task_id':'task'}),
                 ])
+            elif kind == 'attachment':
+                entries.append(dict(type='attachment', attachment=dict(
+                    type='queued_command', commandMode='task-notification',
+                    origin={'kind':'task-notification'}, prompt='<task-notification>'
+                    '<task-id>task</task-id><status>completed</status></task-notification>')))
             transcript.write_text(''.join(json.dumps(e)+'\n' for e in entries))
             data.update(prompt_id=new, prompt='new question /mute')
             run('kibitz_hook_user_prompt_submit.py', data)
@@ -668,6 +673,10 @@ class StorageIntegrationTest(unittest.TestCase):
             data.update(hook_event_name='Stop', last_assistant_message='answer', background_tasks=[])
             self.hook(self.host, 'done', data)
             self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+            if kind == 'attachment':
+                run('kibitz_hook_stop.py', dict(data, background_tasks=[{'id':'task'}]))
+                self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+                self.assertEqual(self.tracking()['reviews'][module.exchange_id('host', old)]['phase'], 'expected')
             run('kibitz_hook_stop.py', data)
             self.assertEqual(self.tracking()['reviews'][module.exchange_id('host', old)]['phase'], 'cancelled')
             self.assertFalse(self.tracking()['windows'][self.window]['review_pending'])
@@ -677,6 +686,93 @@ class StorageIntegrationTest(unittest.TestCase):
                     break
                 time.sleep(.02)
             self.assertEqual(self.bells.read_text(), 'done\n'*number)
+
+    def test_attached_task_completion_waits_for_receiving_turn_review(self):
+        kibitz = Path(os.environ.get('KIBITZ_TEST_REPO', ROOT.parent / 'kibitz'))
+        if not (kibitz/'hooks/kibitz_notifications.py').exists():
+            self.skipTest('set KIBITZ_TEST_REPO')
+        reviewer = self.tmux('split-window', '-d', '-P', '-F', '#{pane_id}',
+                             '/bin/bash --noprofile --norc')
+        self.tmux('set', '-p', '-t', reviewer, '@kibitz_host_pane', self.host)
+        self.tmux('set', '-p', '-t', reviewer, '@name', 'codex')
+        bindir = self.tmp/'bin'
+        bindir.mkdir()
+        transport = bindir/'tmux-bridge'
+        transport.write_text('#!/bin/sh\nexit 0\n')
+        transport.chmod(0o755)
+        self.env['PATH'] = str(bindir)+os.pathsep+self.env['PATH']
+        transcript = self.tmp/'transcript.jsonl'
+
+        def run(name, data):
+            subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
+                           env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
+                           text=True, check=True, capture_output=True, timeout=20)
+
+        def write(entries):
+            transcript.write_text(''.join(json.dumps(e)+'\n' for e in entries))
+
+        for number, indicator_first in enumerate((False, True), 1):
+            with self.subTest(indicator_first=indicator_first):
+                old, new = f'old-{number}', f'new-{number}'
+                entries = []
+                for prompt in (old, new):
+                    entries.append(dict(type='user', promptId=prompt,
+                                        message={'content': prompt}))
+                    write(entries)
+                    data = dict(session_id='host', prompt_id=prompt, prompt=prompt,
+                                hook_event_name='UserPromptSubmit', transcript_path=str(transcript))
+                    run('kibitz_hook_user_prompt_submit.py', data)
+                    self.hook(self.host, 'running', data)
+                    entries.append(dict(type='user', message={'content': []},
+                                        toolUseResult={'backgroundTaskId': prompt+'-task'}))
+                    write(entries)
+                    data.update(hook_event_name='Stop', last_assistant_message='still working',
+                                background_tasks=[{'id': p+'-task'} for p in (old, new)])
+                    self.hook(self.host, 'done', data)
+                    run('kibitz_hook_stop.py', data)
+
+                notice = ('<task-notification><task-id>'+new+'-task</task-id>'
+                          '<status>completed</status></task-notification>')
+                data.update(prompt_id=new+'-wake', prompt=notice, hook_event_name='UserPromptSubmit')
+                entries.append(dict(type='user', promptId=data['prompt_id'], message={'content': notice}))
+                write(entries)
+                run('kibitz_hook_user_prompt_submit.py', data)
+                self.hook(self.host, 'running', data)
+                entries.append(dict(type='attachment', attachment=dict(
+                    type='queued_command', commandMode='task-notification',
+                    origin={'kind':'task-notification', 'producer':'session-task'},
+                    prompt='<task-notification><task-id>'+old+'-task</task-id>'
+                           '<status>completed</status></task-notification>')))
+                write(entries)
+                data.update(hook_event_name='Stop', last_assistant_message='both tasks finished',
+                            background_tasks=[])
+                if indicator_first:
+                    self.hook(self.host, 'done', data)
+                run('kibitz_hook_stop.py', data)
+                if not indicator_first:
+                    self.hook(self.host, 'done', data)
+                tracking = self.tracking()
+                self.assertEqual(tracking['reviews'][module.exchange_id('host', old)]['phase'], 'cancelled')
+                self.assertEqual(tracking['reviews'][module.exchange_id('host', new)]['phase'], 'queued')
+                self.assertNotIn(module.exchange_id('host', new+'-wake'), tracking['reviews'])
+                self.assertFalse(tracking['windows'][self.window]['ready'])
+                self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+                self.assertEqual(self.bells.read_text() if self.bells.exists() else '', 'done\n'*(number-1))
+
+                review = dict(session_id='reviewer', turn_id=new, hook_event_name='UserPromptSubmit',
+                              prompt='[kibitz from:claude]\n\nUSER:\n'+new+'\n\nCLAUDE:\nboth tasks finished')
+                self.hook(reviewer, 'running', review)
+                review['hook_event_name'] = 'Stop'
+                self.hook(reviewer, 'done', review)
+                self.assertTrue(self.tracking()['windows'][self.window]['ready'])
+                self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+                for _ in range(50):
+                    if self.bells.exists() and self.bells.read_text() == 'done\n'*number:
+                        break
+                    time.sleep(.02)
+                self.assertEqual(self.bells.read_text(), 'done\n'*number)
+                run('kibitz_hook_stop.py', data)
+                self.assertEqual(self.tracking()['windows'][self.window]['sequence'], number)
 
     def test_failed_write_cannot_publish_a_color_or_ring(self):
         data = dict(session_id='host', prompt_id='new', hook_event_name='UserPromptSubmit')
