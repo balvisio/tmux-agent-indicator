@@ -219,6 +219,146 @@ class CompletionTest(unittest.TestCase):
             self.assertEqual(self.n.panes['%2']['state'], 'running')
         self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
 
+    def test_native_background_shell_holds_completed_review_until_idle(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.state('%1', 'done')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        native = dict(status='shell', statusUpdatedAt=3000)
+        with patch.object(module.input_status, 'claude_session', return_value=native):
+            self.n.background_shells()
+            self.assertFalse(self.state('%2', 'done', 'r1', 'reviewer'))
+            self.assertTrue(self.n.windows['@1']['shell_running'])
+            self.assertFalse(self.n.windows['@1']['review_pending'])
+            self.assertFalse(self.n.windows['@1']['ready'])
+            # Repeated stops do not lose the shell or produce extra completion.
+            self.assertFalse(self.state('%1', 'done'))
+            for status in ('busy', 'waiting'):
+                native.update(status=status, statusUpdatedAt=4000)
+                self.n.background_shells()
+                self.assertFalse(self.n.completions())
+            native.update(status='idle', statusUpdatedAt=5000)
+            self.n.background_shells()
+            self.assertEqual(len(self.n.completions()), 1)
+            self.assertTrue(self.n.windows['@1']['ready'])
+            self.n.background_shells()
+            self.assertFalse(self.n.completions())
+
+    def test_background_stop_precedes_native_file_update(self):
+        self.live['%2']['host'] = ''
+        self.n.state('%1', 'claude', 'running',
+                     dict(payload('host', 'h1', 'UserPromptSubmit'), received_at=1))
+        data = module.hook_data(dict(payload('host', 'h1', 'Stop'), background_tasks=[
+            dict(id='task', type='shell', status='running', command='private command')]))
+        data['received_at'] = 10
+        self.assertTrue(data['background_shells'])
+        self.assertNotIn('private command', json.dumps(data))
+        self.n.state('%1', 'claude', 'done', data)
+        native = dict(status='idle', statusUpdatedAt=9000)
+        with patch.object(module.input_status, 'claude_session', return_value=native):
+            self.n.background_shells()
+            self.assertFalse(self.n.completions())
+            native['status'] = 'shell'  # older status must not lower the watermark
+            self.n.background_shells()
+            native['status'] = 'idle'
+            self.n.background_shells()
+            self.assertFalse(self.n.completions())
+            native['statusUpdatedAt'] = 11000
+            self.n.background_shells()
+            self.assertEqual(len(self.n.completions()), 1)
+
+    def test_background_shell_loss_and_interrupt_do_not_announce_success(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                self.setUp()
+                self.state('%1', 'running')
+                self.handoff('skip')
+                with patch.object(module.input_status, 'claude_session',
+                                  return_value=dict(status='shell', statusUpdatedAt=3000)):
+                    self.n.background_shells()
+                    self.assertFalse(self.state('%1', 'done'))
+                    if cancelled:
+                        self.state('%1', 'off')
+                        self.n.background_shells()
+                        self.assertNotIn('background_shell', self.n.panes['%1'])
+                with patch.object(module.input_status, 'claude_session', return_value=None):
+                    self.n.background_shells()
+                self.assertFalse(self.n.completions())
+                self.assertTrue(self.n.windows['@1']['ready'])
+
+    def test_final_stop_clears_shell_before_native_file_and_duplicates_cannot_revive_it(self):
+        self.live['%2']['host'] = ''
+        self.n.state('%1', 'claude', 'running',
+                     dict(payload('host', 'h1', 'UserPromptSubmit'), received_at=1))
+        interim = dict(payload('host', 'h1', 'Stop'), received_at=2, background_shells=True)
+        self.n.state('%1', 'claude', 'done', interim)
+        native = dict(status='shell', statusUpdatedAt=3000)
+        with patch.object(module.input_status, 'claude_session', return_value=native):
+            self.n.background_shells()
+            self.assertFalse(self.n.completions())
+            self.n.state('%1', 'claude', 'running',
+                         dict(payload('host', 'finished', 'UserPromptSubmit'), received_at=4))
+            self.n.state('%1', 'claude', 'done',
+                         dict(payload('host', 'finished', 'Stop'), received_at=5, background_shells=False))
+            self.n.background_shells()  # native file still says shell from before Stop
+            self.assertEqual(len(self.n.completions()), 1)
+            self.n.state('%1', 'claude', 'done', dict(interim, prompt_id='finished',
+                         turn_id='finished', received_at=6))  # duplicate must not add a hold
+            self.n.background_shells()
+            self.assertFalse(self.n.windows['@1']['shell_running'])
+            self.assertFalse(self.n.completions())
+            # A genuinely newer shell status can repair an incomplete hook snapshot.
+            native['statusUpdatedAt'] = 7000
+            self.n.background_shells()
+            self.n.completions()
+            self.assertTrue(self.n.windows['@1']['shell_running'])
+
+    def test_focus_acknowledges_reply_but_does_not_hide_background_work(self):
+        self.state('%1', 'running')
+        self.handoff('skip')
+        native = dict(status='shell', statusUpdatedAt=3000)
+        with patch.object(module.input_status, 'claude_session', return_value=native):
+            self.n.background_shells()
+            self.assertFalse(self.state('%1', 'done'))
+            self.n.acknowledge('@1')
+            self.n.background_shells()
+            self.assertFalse(self.n.completions())
+            self.assertTrue(self.n.windows['@1']['shell_running'])
+            native.update(status='idle', statusUpdatedAt=4000)
+            self.n.background_shells()
+            self.assertFalse(self.n.completions())
+            self.assertTrue(self.n.windows['@1']['ready'])
+
+    def test_interrupting_shell_does_not_ring_for_an_already_completed_reviewer(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.state('%1', 'done')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        with patch.object(module.input_status, 'claude_session',
+                          return_value=dict(status='shell', statusUpdatedAt=3000)):
+            self.n.background_shells()
+        self.assertFalse(self.state('%2', 'done', 'r1', 'reviewer'))
+        self.assertFalse(self.state('%1', 'off'))
+        self.assertTrue(self.n.windows['@1']['ready'])
+
+    def test_background_status_does_not_override_state_or_other_windows(self):
+        self.live['%3'] = dict(pid='103', window='@2', host='', state='idle')
+        self.n = module.Notifications(self.data, self.live)
+        self.state('%1', 'running')
+        self.handoff('skip')
+        with patch.object(module.input_status, 'claude_session',
+                          return_value=dict(status='shell', statusUpdatedAt=3000)):
+            self.n.background_shells()
+        self.assertFalse(self.state('%1', 'done'))
+        self.n.state('%3', 'codex', 'running', payload('other', 'o1', 'UserPromptSubmit'))
+        self.n.state('%3', 'codex', 'done', payload('other', 'o1', 'Stop'))
+        self.assertEqual(self.n.completions(), [('@2', '%3', 'codex')])
+        self.state('%1', 'needs-input')
+        self.assertEqual(self.n.panes['%1']['state'], 'needs-input')
+        self.n.background_shells(enabled=False)
+        self.assertFalse(self.n.completions())  # still waiting for input
+        self.assertFalse(self.n.windows['@1']['shell_running'])
+
     def test_task_notification_classification_does_not_swallow_ordinary_prompts(self):
         for text in ('Explain <task-notification>', '"<task-notification>"'):
             with self.subTest(text=text):
@@ -519,6 +659,70 @@ class StorageIntegrationTest(unittest.TestCase):
 
     def tracking(self):
         return json.loads(self.tmux('show-option', '-gqv', module.OPTION))
+
+    def test_background_shell_holds_color_and_completion_without_a_review(self):
+        self.tmux('set', '-g', '@agent-indicator-running-window-title-bg', 'yellow')
+        self.tmux('set', '-g', '@agent-indicator-running-window-title-fg', 'black')
+        self.tmux('set', '-g', '@agent-indicator-needs-input-window-title-bg', 'magenta')
+        self.tmux('set', '-g', '@agent-indicator-needs-input-window-title-fg', 'white')
+        self.tmux('set', '-g', '@agent-indicator-input-delay', '0')
+        pid = self.tmux('display-message', '-p', '-t', self.host, '#{pane_pid}')
+        _parent, started = module.input_status.process(int(pid))
+        sessions = self.tmp / '.claude' / 'sessions'
+        sessions.mkdir(parents=True)
+        native = dict(sessionId='fixture', pid=int(pid), procStart=started,
+                      pidDomain=module.input_status.pid_domain(), status='idle', statusUpdatedAt=0)
+        path = sessions / (pid + '.json')
+        def publish(status, **extra):
+            native.update(status=status, statusUpdatedAt=time.time() * 1000)
+            path.write_text(json.dumps(dict(native, **extra)))
+        def sweep():
+            subprocess.run([str(ROOT/'scripts/window-state.sh'), '--notifications'], env=self.env,
+                           capture_output=True, check=True, timeout=20)
+        data = dict(session_id='fixture', prompt_id='human', hook_event_name='UserPromptSubmit')
+        publish('idle')
+        self.hook(self.host, 'running', data)
+        stop = dict(data, hook_event_name='Stop', background_tasks=[
+            dict(id='task', type='shell', status='running')])
+        self.hook(self.host, 'done', stop)
+        # The Stop payload holds completion even before the native file updates.
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        self.assertFalse(self.tracking()['windows'][self.window]['ready'])
+        self.assertFalse(self.bells.exists())
+        publish('shell')
+        sweep()
+        self.assertIn('bg=yellow', self.tmux('show-option', '-wqv', 'window-status-style'))
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-shell-running'), '1')
+        # A real question takes precedence over background work.
+        self.hook(self.host, 'needs-input', dict(data, hook_event_name='PermissionRequest'))
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'needs-input')
+        self.assertIn('bg=magenta', self.tmux('show-option', '-wqv', 'window-status-style'))
+        self.hook(self.host, 'done', stop)
+        publish('idle')
+        sweep()
+        self.assertTrue(self.tracking()['windows'][self.window]['ready'])
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        self.assertEqual(self.bells.read_text().splitlines().count('done'), 1)
+        sweep()
+        self.assertEqual(self.bells.read_text().splitlines().count('done'), 1)
+
+        # Recover an already-finished reply without inventing another bell.
+        publish('shell', pidDomain='other-namespace')
+        sweep()
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        publish('shell', procStart='reused-pid')
+        sweep()
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'done')
+        publish('shell')
+        sweep()
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        subprocess.run([str(ROOT/'scripts/pane-focus-in.sh'), self.host, self.window],
+                       env=self.env, capture_output=True, check=True, timeout=20)
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'running')
+        publish('idle')
+        sweep()
+        self.assertEqual(self.tmux('show-option', '-wqv', '@agent-indicator-state'), 'idle')
+        self.assertEqual(self.bells.read_text().splitlines().count('done'), 1)
 
     def test_native_shell_continuation_repairs_color_and_completes_once(self):
         self.tmux('set', '-g', '@agent-indicator-running-window-title-bg', 'yellow')

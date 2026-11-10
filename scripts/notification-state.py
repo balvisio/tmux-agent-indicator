@@ -40,6 +40,12 @@ def hook_data(payload):
                "transcript_path")}
     result["received_at"] = input_status.time.time()
     result["claude_config_dir"] = os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+    # Keep only the fact that shell work remains, never commands or task output.
+    if isinstance(payload.get("background_tasks"), list):
+        result["background_shells"] = any(
+            isinstance(task, dict) and task.get("type") == "shell"
+            and task.get("status") in ("running", "pending")
+            for task in payload["background_tasks"])
     prompt = payload.get("prompt") or ""
     result["task_notification"] = prompt.lstrip().startswith("<task-notification>")
     intervals = {(0, len(prompt))} if prompt else set()
@@ -222,6 +228,41 @@ class Notifications:
             changes.append((pane, "claude", "running", False))
         return changes
 
+    def background_shells(self, enabled=True):
+        """Keep live shell work separate from completed replies and reviews."""
+        for pane, current in self.panes.items():
+            previous = current.get("background_shell")
+            if not enabled or current["agent"] != "claude" or current["state"] == "off":
+                current.pop("background_shell", None)
+                continue
+            context = current.get("claude", dict(session=current["turn"].split(":", 1)[0],
+                config_dir=os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))))
+            try:
+                # Most panes have no shell work. Filter their files before doing
+                # process checks, just as the shell-continuation sweep does.
+                native = input_status.claude_session(context, self.live[pane]["pid"],
+                                                     None if previous else {"shell"})
+                updated = float(native["statusUpdatedAt"]) / 1000 if native else 0
+                if not math.isfinite(updated):
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if native and native.get("status") == "shell":
+                if updated > current.get("shell_stopped_at", 0):
+                    current["background_shell"] = dict(after=max(updated, (previous or {}).get("after", 0)),
+                                                       native=True)
+            elif native and native.get("status") == "idle":
+                # Stop hooks precede Claude's session-file update. An older idle
+                # value cannot contradict shell work reported by that hook.
+                if previous and updated >= previous["after"]:
+                    current.pop("background_shell", None)
+            elif not native and previous and previous.get("native"):
+                # Losing a validated owner/file is not successful completion.
+                current.pop("background_shell", None)
+                self.windows[self.live[pane]["window"]]["pending"].clear()
+            # Busy/waiting may be Claude continuing after a shell exits. Keep the
+            # hold until it reaches idle or a hook explicitly cancels the turn.
+
     def state(self, pane, agent, state, payload):
         if pane not in self.live:
             return
@@ -275,8 +316,11 @@ class Notifications:
             state = self.questions.transition(pane, agent, state, payload)
             if state is None:
                 return False
+        new_completion = False
         if state == "done":
-            if not current.get("observed") or current["state"] != "done" or (turn and current["last_done"] != turn):
+            new_completion = (not current.get("observed") or current["state"] != "done"
+                              or bool(turn and current["last_done"] != turn))
+            if new_completion:
                 self.windows[self.live[pane]["window"]]["pending"][pane] = agent
             current["last_done"] = turn
         elif state == "off":
@@ -310,6 +354,16 @@ class Notifications:
             current["event_at"] = max(current.get("event_at", 0), payload.get("received_at", input_status.time.time()))
             if session:
                 current["claude"] = context
+            if state == "off":
+                if current.get("background_shell"):
+                    self.windows[self.live[pane]["window"]]["pending"].clear()
+                current.pop("background_shell", None)
+            elif new_completion and event == "Stop" and "background_shells" in payload:
+                if payload["background_shells"]:
+                    current["background_shell"] = dict(after=current["event_at"], native=False)
+                else:
+                    current.pop("background_shell", None)
+                    current["shell_stopped_at"] = current["event_at"]
         return True
 
     def handoff(self, message):
@@ -356,7 +410,8 @@ class Notifications:
                               (r["host"] in panes or r["reviewer"] in panes)
                               for r in self.reviews.values())
             window["review_pending"] = outstanding
-            window["ready"] = not busy and not outstanding
+            window["shell_running"] = any(self.panes[p].get("background_shell") for p in panes)
+            window["ready"] = not busy and not outstanding and not window["shell_running"]
             if window["pending"] and window["ready"]:
                 pane, agent = next(reversed(window["pending"].items()))
                 window["pending"].clear()
@@ -459,9 +514,12 @@ def main():
     for pane, _agent, state, _notify in input_changes:
         tracker.panes[pane]["state"] = state
 
+    tracker.background_shells(option("@agent-indicator-running-enabled", "on").lower()
+                              in ("on", "true", "yes", "1"))
+
     enabled = option("@agent-indicator-notification-enabled", "on")
     states = option("@agent-indicator-notification-states", "needs-input,done")
-    previous_pending = {wid: window.get("review_pending", False)
+    previous_pending = {wid: (window.get("review_pending", False), window.get("shell_running", False))
                         for wid, window in tracker.windows.items()}
     events = tracker.completions(enabled.lower() in ("on", "true", "yes", "1")
                                  and "done" in states.split(","))
@@ -479,6 +537,8 @@ def main():
                          f'{data["epoch"]}:{window["sequence"]}:{int(window["ready"])}'])
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-review-pending",
                          str(int(window["review_pending"]))])
+        commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-shell-running",
+                         str(int(window["shell_running"]))])
         failed = any(r["phase"] == "error" and r["host"] in live
                      and live[r["host"]]["window"] == wid for r in tracker.reviews.values())
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-notification-error",
@@ -503,7 +563,7 @@ def main():
             print("QUIET input")
     # Handoffs and owner cleanup can change the color without another agent hook.
     for wid, window in tracker.windows.items():
-        if window["review_pending"] != previous_pending[wid]:
+        if (window["review_pending"], window["shell_running"]) != previous_pending[wid]:
             print("RENDER", wid)
     if apply_state is False:
         print("SKIP stale")

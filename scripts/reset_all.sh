@@ -59,6 +59,7 @@ while IFS= read -r window_id; do
     tmux set-window-option -qt "$window_id" @agent-indicator-state idle
     tmux set-window-option -qut "$window_id" @agent-indicator-completion
     tmux set-window-option -qut "$window_id" @agent-indicator-review-pending
+    tmux set-window-option -qut "$window_id" @agent-indicator-shell-running
     tmux set-window-option -qut "$window_id" @agent-indicator-notification-error
 done < <(tmux list-windows -a -F '#{window_id}')
 

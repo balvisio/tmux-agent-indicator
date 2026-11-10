@@ -640,6 +640,13 @@ acknowledges its existing completions; Ctrl+C cancels the interrupted turn witho
 If Codex returns a queued review to the input box, it is tracked again when you submit it; discarding
 the draft does not block later completion alerts.
 
+Claude's background shells also keep the window and menu-bar dot yellow, even after both agents
+finish replying. The indicator checks Claude's live session status on the normal sweep and before
+publishing completion; a Stop hook reporting a running shell holds completion immediately. The hold
+clears when Claude reports idle or a final Stop reports no remaining shells. Questions still take priority,
+and focusing the window acknowledges
+pending alerts without hiding the shell work. No shell command text is stored in tmux.
+
 For Kibitz pairs, update and reinstall both plugins. The indicator waits for the specific forwarded
 review, including queued reviews; `/mute` skips that wait and `/tee` tracks the review started at prompt
 submission. Pending reviews also keep the window title and menu-bar dot yellow between agents;

@@ -365,6 +365,12 @@ Hammerspoon running.
 Also run a background shell task in Claude and a yielding shell command in its Codex reviewer.
 Check yellow through both tasks and a single completion after the reviewer finishes.
 
+Background-shell tests also complete both replies while Claude's validated native status is `shell`:
+the window stays yellow, completion stays unready, and no done bell sounds until native status becomes
+`idle`. A Stop payload with running shell work holds completion before that native status update.
+Tests cover a completed Kibitz review, no reviewer, focus acknowledgment, question priority, invalid
+PID/namespace identity, missing owner state, interruption, and an unrelated window completing normally.
+
 Claude `!` shell continuations are covered by `tests/test-group-notifications.py`: after a completed
 prompt, a live busy session and a newer shell submission must restore running/yellow on the sweep.
 The matching Stop completes once; an older Stop, interrupted shell, reused PID, wrong PID namespace,

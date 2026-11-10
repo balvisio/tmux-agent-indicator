@@ -80,8 +80,8 @@ prune_pane_states() {
 # Only live panes participate. A closed or moved pane cannot keep its old window colored.
 window_agent_state() {
     local window_id="$1" pane_id dead state result=idle
-    # A reserved review keeps the window busy across the gap between agents.
-    if [ "$(tmux show-option -wqv -t "$window_id" @agent-indicator-review-pending)" = 1 ] &&
+    # Reviews and background shells remain work after an agent finishes replying.
+    if [ "$(tmux display-message -p -t "$window_id" '#{||:#{@agent-indicator-review-pending},#{@agent-indicator-shell-running}}')" = 1 ] &&
         is_enabled "$(tmux_get_option_or_default @agent-indicator-running-enabled on)"; then
         result=running
     fi

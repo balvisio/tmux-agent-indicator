@@ -77,10 +77,12 @@ for _ in $(seq 1 100); do
 done
 [ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'respawn-window retained state'
 pass 'pane and window respawn clear stale state without erasing sibling work'
+tmux_cmd set-window-option -t "$WIN" @agent-indicator-shell-running 1
 tmux_cmd run-shell "\"$REPO_ROOT/scripts/reset_all.sh\""
 [ "$(get_window_option "$WIN" @agent-indicator-state)" = idle ] || fail 'reset did not publish idle'
 assert_empty "$(tmux_cmd show-option -gqv @agent-indicator-notifications)" 'reset retained notification accounting'
 assert_empty "$(get_window_option "$WIN" @agent-indicator-completion)" 'reset retained completion event'
 assert_empty "$(get_window_option "$WIN" @agent-indicator-review-pending)" 'reset retained pending review color'
+assert_empty "$(get_window_option "$WIN" @agent-indicator-shell-running)" 'reset retained background shell color'
 assert_empty "$(get_window_option "$WIN" @agent-indicator-notification-error)" 'reset retained delivery diagnostic'
 pass 'reset clears the published aggregate state and notification accounting'
