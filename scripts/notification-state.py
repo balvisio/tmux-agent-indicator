@@ -175,7 +175,7 @@ class Notifications:
         current = self.panes[pane]
         if turn and current["turn"] == turn:
             return
-        current.update(state="running", turn=turn, last_done="")
+        current.update(state="running", turn=turn, last_done="", interrupt=uuid.uuid4().hex)
         self.windows[self.live[pane]["window"]]["pending"].pop(pane, None)
 
     def shell_turn(self, pane, context, unfinished=False):
@@ -269,6 +269,12 @@ class Notifications:
         if not terminal_hook(agent, payload):
             return False
         current = self.panes[pane]
+        token = payload.get("interrupt_token")
+        if token and (agent != "claude" or state != "off" or current["agent"] != "claude"
+                      or current["state"] not in ("running", "needs-input")
+                      or current.get("interrupt") != token):
+            return False
+        previous_agent = current["agent"]
         current["agent"] = agent
         session = payload.get("session_id", "")
         prompt = payload.get("prompt_id", "")
@@ -349,6 +355,8 @@ class Notifications:
         elif state == "running" and current["state"] != "running":
             self.windows[self.live[pane]["window"]]["pending"].pop(pane, None)
         current["state"] = state
+        if previous_agent != agent or state in ("off", "done"):
+            current.pop("interrupt", None)
         current["observed"] = True
         if agent == "claude":
             current["event_at"] = max(current.get("event_at", 0), payload.get("received_at", input_status.time.time()))
@@ -365,6 +373,13 @@ class Notifications:
                     current.pop("background_shell", None)
                     current["shell_stopped_at"] = current["event_at"]
         return True
+
+    def interrupt_token(self, pane):
+        current = self.panes[pane]
+        if current["agent"] == "claude" and current["state"] in ("running", "needs-input"):
+            return current.setdefault("interrupt", uuid.uuid4().hex)
+        current.pop("interrupt", None)
+        return ""
 
     def handoff(self, message):
         host = message.get("host", "")
@@ -528,10 +543,13 @@ def main():
     terminal = [key for key, review in tracker.reviews.items() if review["phase"] in TERMINAL]
     for key in terminal[:-128]:
         del tracker.reviews[key]
-    commands = [["set-option", "-gq", OPTION, json.dumps(data, separators=(",", ":"))]]
+    commands = []
     for pane in live:
         commands.append(["set-option", "-pq", "-t", pane, "@agent-indicator-input-pending",
                          questions.records.get(pane, {}).get("token", "")])
+        commands.append(["set-option", "-pq", "-t", pane, "@agent-indicator-interrupt",
+                         tracker.interrupt_token(pane)])
+    commands.insert(0, ["set-option", "-gq", OPTION, json.dumps(data, separators=(",", ":"))])
     for wid, window in tracker.windows.items():
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-completion",
                          f'{data["epoch"]}:{window["sequence"]}:{int(window["ready"])}'])

@@ -34,7 +34,7 @@ register_hook_once() {
         local existing_name
         existing_name="${line%% *}"
         tmux set-hook -gu "$existing_name" 2>/dev/null || true
-    done < <(printf '%s\n' "$existing_hooks" | grep -F "$match" || true)
+    done < <(printf '%s\n' "$existing_hooks" | grep -F -e "$match" -e "$CURRENT_DIR" || true)
 
     tmux set-hook -ag "$hook_type" "$command"
 }
@@ -60,7 +60,8 @@ register_interrupt_binding() {
         } }' || true)
     # Preserve custom bindings; reload only our own binding.
     if [ -z "$existing" ] || [[ "$existing" == *"$script"* ]]; then
-        tmux bind-key -n C-c send-keys C-c '\;' run-shell "\"$script\" \"#{pane_id}\""
+        tmux bind-key -n C-c send-keys C-c '\;' if-shell -F '#{!=:#{@agent-indicator-interrupt},}' \
+            "run-shell -b '\"$script\" \"#{pane_id}\" \"#{@agent-indicator-interrupt}\"'"
     fi
 }
 
@@ -81,8 +82,8 @@ main() {
     register_hook_once "pane-exited" "$state_command"
     register_hook_once "pane-died" "$state_command"
     tmux run-shell -b "\"$state_script\""
-    local session_script="$CURRENT_DIR/scripts/session-changed.sh"
-    register_hook_once "client-session-changed" "run-shell \"$session_script\""
+    source "$CURRENT_DIR/scripts/session-hooks.sh"
+    register_session_hooks
 }
 
 main

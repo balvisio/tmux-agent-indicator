@@ -9,18 +9,21 @@ export const TmuxAgentIndicator = async ({ $ }) => {
 
   let lastState = "off";
   let idleAt = 0;
+  let updates = Promise.resolve();
 
-  const setState = async (state) => {
-    if (state === lastState) return;
-    lastState = state;
-    try {
-      if (state === "running") {
-        await $`bash ${script} --agent opencode --state off`;
+  const setState = (state) => {
+    // OpenCode must not wait for tmux's state lock. Serialize updates here so
+    // a slow running update cannot overtake a later permission or completion.
+    updates = updates.then(async () => {
+      if (state === lastState) return;
+      try {
+        await $`bash ${script} --agent opencode --state ${state}`;
+        lastState = state;
+      } catch {
+        // A failed update must not break the queue or suppress the next retry.
+        lastState = null;
       }
-      await $`bash ${script} --agent opencode --state ${state}`;
-    } catch {
-      // non-fatal: tmux may not be available
-    }
+    });
   };
 
   return {
@@ -29,30 +32,30 @@ export const TmuxAgentIndicator = async ({ $ }) => {
           && event.properties.status.type === "busy") {
         // Guard: don't override done/error if idle fired recently (race condition)
         if (Date.now() - idleAt < 2000) return;
-        await setState("running");
+        setState("running");
       }
 
       if (event.type === "permission.updated"
           || event.type === "permission.asked") {
-        await setState("needs-input");
+        setState("needs-input");
       }
 
       if (event.type === "session.idle") {
         idleAt = Date.now();
-        await setState("done");
+        setState("done");
       }
 
       if (event.type === "session.error") {
         idleAt = Date.now();
-        await setState("done");
+        setState("done");
       }
     },
     "permission.ask": async () => {
-      await setState("needs-input");
+      setState("needs-input");
     },
     "tool.execute.before": async (input) => {
       if (input.tool === "question") {
-        await setState("needs-input");
+        setState("needs-input");
       }
     },
   };

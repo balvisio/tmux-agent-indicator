@@ -23,6 +23,8 @@ tests=(
     "$ROOT_DIR/tests/test-resolve-by-process.sh"
     "$ROOT_DIR/tests/test-resolve-ancestry.sh"
     "$ROOT_DIR/tests/test-cancellation-hooks.sh"
+    "$ROOT_DIR/tests/test-client-actions.py"
+    "$ROOT_DIR/tests/test-opencode-plugin.js"
     "$ROOT_DIR/tests/test-notification-command.sh"
     "$ROOT_DIR/tests/test-input-delay.py"
     "$ROOT_DIR/tests/test-group-notifications.py"

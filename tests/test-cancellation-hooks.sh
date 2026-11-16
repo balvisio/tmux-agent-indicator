@@ -89,11 +89,11 @@ done
 # The tmux fallback handles Claude only and must preserve custom Ctrl+C bindings.
 for state in running needs-input; do
     run_in_pane "TMUX_PANE=$source_pane \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state $state"
-    tmux_cmd run-shell "\"$ROOT_DIR/scripts/pane-interrupt.sh\" \"$source_pane\""
+    tmux_cmd run-shell -t "$source_pane" "\"$ROOT_DIR/scripts/pane-interrupt.sh\" \"$source_pane\" \"#{@agent-indicator-interrupt}\""
     assert_empty "$(get_env "TMUX_AGENT_PANE_${source_pane}_STATE")" "Claude Ctrl+C fallback must clear $state"
 done
 run_in_pane "\"$ROOT_DIR/scripts/agent-state.sh\" --agent codex --state running"
-tmux_cmd run-shell "\"$ROOT_DIR/scripts/pane-interrupt.sh\" \"$source_pane\""
+tmux_cmd run-shell -t "$source_pane" "\"$ROOT_DIR/scripts/pane-interrupt.sh\" \"$source_pane\" \"#{@agent-indicator-interrupt}\""
 [ "$(get_env "TMUX_AGENT_PANE_${source_pane}_STATE")" = running ] || fail "Codex must use its native interruption hook"
 tmux_cmd bind-key -n C-c display-message custom-interrupt
 tmux_cmd run-shell "$ROOT_DIR/agent-indicator.tmux"

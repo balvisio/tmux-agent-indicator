@@ -25,6 +25,13 @@ def main():
         print("usage: state-lock.py <script> [arguments...]", file=sys.stderr)
         return 2
 
+    # Keyboard routing touches its own session options, not agent state. Keep
+    # mouse selection independent of slow notification or style updates.
+    scope = "agent-indicator"
+    if sys.argv[1] == "--ssh-passthrough":
+        scope = "agent-ssh"
+        del sys.argv[1]
+
     # A coalesced sweep stays in the foreground so its owner retains the sweep
     # lock until the serialized apply phase actually finishes.
     foreground = sys.argv[1] == "--wait"
@@ -38,7 +45,7 @@ def main():
     socket, pid = server.rsplit("|", 1)
     # Use the socket directory so all clients agree, regardless of HOME/TMPDIR.
     # Never unlink a lock file: existing waiters must keep using the same inode.
-    path = f"{socket}.agent-indicator-{pid}.lock"
+    path = f"{socket}.{scope}-{pid}.lock"
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     if fd != LOCK_FD:
         os.dup2(fd, LOCK_FD)

@@ -28,6 +28,7 @@ assert_non_empty "$while_away_current_style" "window-status-current-style should
 tmux_cmd select-window -t ai:main
 # Wait for an explicit focus handler so the assertion cannot race an asynchronous hook.
 tmux_cmd run-shell "$ROOT_DIR/scripts/pane-focus-in.sh \"$PANE\" \"$WIN\""
+wait_for_state_writers
 
 after_return_style="$(get_window_option "$WIN" "window-status-style")"
 after_return_current_style="$(get_window_option "$WIN" "window-status-current-style")"
@@ -39,6 +40,9 @@ after_return_current_style="$(get_window_option "$WIN" "window-status-current-st
 
 # The PostToolUse transition, rather than focus, clears the waiting title.
 tmux_cmd run-shell "TMUX_PANE=$PANE \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state running --if-state needs-input"
+# A contended hook returns with its writer still queued; observe its committed
+# result before comparing styles, just as run_state does above.
+wait_for_state_writers
 [ "$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")" = running ] || fail "PostToolUse must transition out of needs-input"
 assert_empty "$(get_window_option "$WIN" window-status-style)" "waiting title should reset after the agent resumes"
 assert_empty "$(get_window_option "$WIN" window-status-current-style)" "waiting active title should reset after the agent resumes"

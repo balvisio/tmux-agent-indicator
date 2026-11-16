@@ -61,6 +61,11 @@ temporary files, removed after each check or reload, so large process listings c
 and stall discovery. Other Hammerspoon modules share the same
 UI thread, so synchronous commands in those modules can still delay the menu.
 
+Remote checks reuse an existing authenticated SSH connection through the user's `ControlPath`.
+They never create a background SSH master or fork, so a new persistent process cannot keep the
+check's output pipes open. Without an existing connection, SSH makes a standalone noninteractive
+attempt; hosts requiring interactive authentication need an authenticated connection first.
+
 Supported colors include tmux names, `colour0`–`colour255` (`colorN` also works), and `#RRGGBB`.
 RGB and extended indexed colors have portable values; named/ANSI colors use stable menu-bar
 counterparts because terminal themes can redefine those colors. When the background has no explicit

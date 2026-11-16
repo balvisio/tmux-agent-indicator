@@ -147,11 +147,6 @@ if [ -n "$if_state" ]; then
             [ -n "$(tmux show-option -pqv -t "$pane_id" @agent-indicator-input-pending)" ] || exit 0
     fi
 fi
-pane_session=$(tmux display-message -p -t "$pane_id" '#{session_name}' 2>/dev/null || true)
-if [ -n "$pane_session" ]; then
-    tmux_unset_env "TMUX_AGENT_SESSION_SEEN_${pane_session}"
-fi
-
 if [ "$state" != off ] && ! is_enabled "$(tmux_get_option_or_default "@agent-indicator-${state}-enabled" on)"; then
     state=off
 fi
@@ -159,6 +154,10 @@ fi
 # changing colors. Completion accounting shares this writer lock.
 if ! reconcile_notifications state "$pane_id" "$agent" "$state"; then
     exit 0
+fi
+pane_session=$(tmux display-message -p -t "$pane_id" '#{session_id}' 2>/dev/null || true)
+if [ -n "$pane_session" ]; then
+    tmux set-option -qu -t "$pane_session" @agent-indicator-session-seen 2>/dev/null || true
 fi
 apply_agent_state "$pane_id" "$agent" "$state" "$TMUX_AGENT_EVENT_PANE_PID" || exit 0
 sync_animation

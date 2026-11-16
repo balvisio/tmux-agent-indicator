@@ -59,24 +59,27 @@ def main():
         assert errors.read_text() == 'x' * 100000 + '\n'
         assert output.stat().st_mode & 0o777 == 0o600
         print('PASS: large background output cannot fill task pipes, stays private, and preserves Unicode')
-        # An interactive SSH configuration must not make a probe fork or reuse a
-        # background master, which could retain Hammerspoon's output pipes.
+        # Reuse a user-configured socket without creating a new master or forking,
+        # even when the interactive SSH configuration normally enables both.
         ssh = shutil.which("ssh")
         if ssh:
             config = fixture / "ssh_config"
-            config.write_text("Host *\n  ControlMaster auto\n  ControlPath /tmp/fixture-master\n"
-                              "  ControlPersist 60\n  ForkAfterAuthentication yes\n")
             args = (fixture / "ssh-args.txt").read_text().splitlines()
-            effective = subprocess.check_output(
-                [ssh, "-G", "-F", str(config), *args[2:-2], "fixture.invalid"],
-                text=True, stderr=subprocess.DEVNULL, timeout=5,
-            )
-            settings = dict(line.split(" ", 1) for line in effective.splitlines())
-            assert settings["controlmaster"] == "false", settings["controlmaster"]
-            assert settings["controlpersist"] in ("no", "0"), settings["controlpersist"]
-            assert settings["forkafterauthentication"] == "no", settings["forkafterauthentication"]
-            assert settings.get("controlpath", "none") == "none", settings.get("controlpath")
-            print("PASS: real SSH configuration cannot enable background masters for indicator probes")
+            for control_path in (str(fixture / "ssh-master"), "none", None):
+                config.write_text("Host *\n  ControlMaster auto\n"
+                                  + (f"  ControlPath {control_path}\n" if control_path else "")
+                                  + "  ControlPersist 60\n  ForkAfterAuthentication yes\n")
+                effective = subprocess.check_output(
+                    [ssh, "-G", "-F", str(config), *args[2:-2], "fixture.invalid"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=5,
+                )
+                settings = dict(line.split(" ", 1) for line in effective.splitlines())
+                assert settings["controlmaster"] == "false", settings["controlmaster"]
+                assert settings["controlpersist"] in ("no", "0"), settings["controlpersist"]
+                assert settings["forkafterauthentication"] == "no", settings["forkafterauthentication"]
+                assert settings["batchmode"] == "yes", settings["batchmode"]
+                assert settings.get("controlpath", "none") == (control_path or "none"), settings.get("controlpath")
+            print("PASS: SSH probes preserve configured socket reuse without enabling background masters or prompts")
         clients, terminals = [], []
         try:
             tmux("-f", "/dev/null", "new-session", "-d", "-s", "test", "/bin/bash --noprofile --norc")

@@ -86,6 +86,21 @@ class QuestionsTest(unittest.TestCase):
         self.assertEqual(self.question(), "needs-input")
         self.assertTrue(self.q.silent)
 
+    def test_parallel_tool_confirms_deadline_before_superseding_reader(self):
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                self.setUp()
+                self.q.transition("%1", agent, "needs-input", self.payload)
+                self.observed = "waiting"
+                self.q.now = 14
+                post = dict(self.payload, hook_event_name="PostToolUse", tool_use_id="other")
+                self.assertEqual(self.q.transition("%1", agent, "running", post), "needs-input")
+                self.assertTrue(self.q.records["%1"]["shown"])
+                self.assertFalse(self.q.silent)
+                self.assertEqual(self.report("waiting", observed_at=13.5), [])
+                self.assertIsNone(self.q.transition("%1", agent, "running", post))
+                self.assertEqual(self.q.check(), [])
+
     def test_new_question_replaces_old_timer(self):
         self.question()
         self.q.now = 12
@@ -421,7 +436,9 @@ class TmuxTest(unittest.TestCase):
         return subprocess.check_output(["tmux", "-S", self.socket, *args], env=self.env,
                                        text=True, stderr=subprocess.STDOUT, timeout=10).strip()
 
-    def wait(self, condition, timeout=6):
+    def wait(self, condition, timeout=10):
+        # The three-second grace is followed by a serialized state/style write.
+        # Allow slow process launches without relaxing the deadline assertions.
         until = time.monotonic() + timeout
         while time.monotonic() < until:
             if condition():
@@ -513,10 +530,13 @@ class TmuxTest(unittest.TestCase):
     def test_codex_dialog_missed_between_samples_stays_yellow_and_silent(self):
         self.codex_fixture()
         self.codex_action("question")
-        self.codex_action("post")
-        question = json.loads(self.tmux("show-option", "-gqv", "@agent-indicator-notifications"))["questions"][self.pane]
+        question = self.question_record()
+        self.assertTrue(question)
         self.assertFalse(question["seen_waiting"])
         self.assertFalse(question["shown"])
+        # PostToolUse can finish after the grace on a slow host. The reader may
+        # already have correctly cleared the question by then.
+        self.codex_action("post")
         self.assertEqual(self.state(), "running")
         self.wait(lambda: not self.tmux("show-option", "-pqv", "-t", self.pane,
                                        "@agent-indicator-input-pending"))
@@ -528,7 +548,10 @@ class TmuxTest(unittest.TestCase):
     def test_codex_visible_question_rings_once_then_resumes(self):
         self.codex_fixture()
         self.codex_action("question", "waiting")
+        # The visible dialog starts its own grace, then the serialized writer
+        # applies the alert. Allow for both without changing the actual delay.
         self.wait(lambda: self.bells() == ["needs-input"])
+        self.assertGreaterEqual(time.monotonic(), self.question_record()["deadline"])
         self.assertEqual(self.state(), "needs-input")
         self.assertIn("bg=magenta", self.tmux("show-option", "-wv", "-t", self.window, "window-status-style"))
         self.codex_action("paint", "working")

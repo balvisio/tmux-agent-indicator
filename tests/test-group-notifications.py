@@ -50,6 +50,43 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(len(self.state('%1', 'done')), 1)
         self.assertFalse(self.state('%1', 'done'))
 
+    def test_deferred_ctrl_c_cancels_only_the_captured_turn(self):
+        self.state('%1', 'running')
+        token = self.n.interrupt_token('%1')
+        self.state('%1', 'needs-input')
+        self.assertEqual(self.n.interrupt_token('%1'), token)
+        self.n.state('%1', 'claude', 'running', payload('host', 'h1', 'PostToolUse'))
+        self.assertEqual(self.n.interrupt_token('%1'), token)
+        self.state('%1', 'running', 'h2')
+        current_token = self.n.interrupt_token('%1')
+        self.assertNotEqual(current_token, token)
+        before = json.dumps(self.data, sort_keys=True)
+        self.assertFalse(self.n.state('%1', 'claude', 'off', dict(interrupt_token=token)))
+        self.assertEqual(json.dumps(self.data, sort_keys=True), before)
+        self.assertTrue(self.n.state('%1', 'claude', 'off',
+                                    dict(interrupt_token=current_token, hook_event_name='Interrupt')))
+        self.assertEqual(self.n.interrupt_token('%1'), '')
+        self.assertEqual(self.n.panes['%1']['cancelled_turn'], 'host:h2')
+        self.assertFalse(self.state('%1', 'done', 'h2'))
+        self.assertEqual(self.n.panes['%1']['state'], 'off')
+
+    def test_deferred_ctrl_c_ignores_completion_and_replacement(self):
+        for replacement in ('done', 'codex', 'pid'):
+            self.setUp()
+            self.state('%1', 'running')
+            token = self.n.interrupt_token('%1')
+            if replacement == 'done':
+                self.state('%1', 'done')
+            elif replacement == 'codex':
+                self.n.state('%1', 'codex', 'running', payload('codex', 'r1', 'UserPromptSubmit'))
+            else:
+                self.live['%1']['pid'] = '999'
+                self.n = module.Notifications(self.data, self.live)
+                self.state('%1', 'running', 'new')
+            before = json.dumps(self.data, sort_keys=True)
+            self.assertFalse(self.n.state('%1', 'claude', 'off', dict(interrupt_token=token)))
+            self.assertEqual(json.dumps(self.data, sort_keys=True), before)
+
     def test_transient_codex_hooks_cannot_replace_the_visible_review(self):
         self.state('%1', 'running')
         self.handoff('queue')

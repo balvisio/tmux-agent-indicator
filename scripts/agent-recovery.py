@@ -372,6 +372,7 @@ def restore(root, manual=False):
         run_resurrect("restore", stage, keep_existing=already_restored)
     if identity() == server:
         tmux("set-option", "-gq", "@agent_recovery_restored", server)
+        return True
 
 
 def resume(token):
@@ -427,7 +428,9 @@ def setup():
         # Keep Resurrect's configured bindings, routing manual saves through the same atomic writer.
         keys = option("@resurrect-" + action) or ("C-s" if action == "save" else "C-r")
         for key in keys.split():
-            tmux("bind-key", key, "run-shell", shlex.quote(wrapper) + (" manual" if action == "restore" else ""))
+            tmux("bind-key", key, "run-shell", "-b",
+                 shlex.quote(wrapper) + (" manual" if action == "restore" else "")
+                 + " --notify-client #{q:client_name} --notify-pid #{client_pid}")
     command = shlex.join([str(SCRIPT), "save", "--background"])
     for event in ("window-layout-changed", "session-created", "session-closed", "session-renamed", "window-renamed"):
         for line in tmux("show-hooks", "-g", event).splitlines():
@@ -478,10 +481,22 @@ def disable(target=None):
             tmux("unbind-key", "-T", words[table + 1], words[table + 2])
 
 
+def manual_feedback(message):
+    """Only notify the client that pressed the shortcut, if it is still attached."""
+    try:
+        client = sys.argv[sys.argv.index("--notify-client") + 1]
+        pid = sys.argv[sys.argv.index("--notify-pid") + 1]
+        if any(name == client and owner == pid for name, owner in client_sessions()):
+            tmux("display-message", "-c", client, "Recovery: " + message)
+    except (IndexError, *ERRORS):
+        pass
+
+
 def main():
     original_umask = os.umask(0o077)
     action = sys.argv[1]
-    background = action == "startup" or action == "save" and bool({"--background", "quiet"} & set(sys.argv[2:]))
+    notify = "--notify-client" in sys.argv[2:]
+    background = notify or action == "startup" or action == "save" and bool({"--background", "quiet"} & set(sys.argv[2:]))
     root = None
     # Keep the writer lock through error reporting so a failure cannot overwrite newer success.
     with ExitStack() as stack:
@@ -495,9 +510,13 @@ def main():
                 disable(sys.argv[2] if len(sys.argv) > 2 else None)
             elif action in ("hook", "ssh"):
                 record(sys.argv[2] if action == "hook" else "ssh", sys.argv[2:])
-            elif action in ("save", "restore", "startup") and enabled():
+            elif action in ("save", "restore", "startup"):
+                if not enabled():
+                    if notify:
+                        manual_feedback("disabled")
+                    return
                 root = state_dir()
-                if action == "save":
+                if action == "save" and not notify:
                     time.sleep(0.5)
                 elif action == "startup":
                     # Config loading may precede the initial session. Run after that command completes.
@@ -506,7 +525,11 @@ def main():
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | (0 if action == "startup" else fcntl.LOCK_NB))
                 except BlockingIOError:
+                    if notify:
+                        manual_feedback("another save or restore is running; try again")
                     return
+                if notify:
+                    manual_feedback("saving…" if action == "save" else "restoring…")
                 if action == "startup":
                     if option("@agent_recovery_startup") == "pending":
                         if enabled() and option("@continuum-restore") == "on" and not (Path.home() / "tmux_no_auto_restore").exists():
@@ -516,12 +539,20 @@ def main():
                 elif action == "save":
                     if option("@agent_recovery_startup") == "ready" and save(root):
                         saved_successfully(root)
+                        if notify:
+                            manual_feedback("saved")
+                    elif notify:
+                        manual_feedback("save skipped; layout changed or startup restore is not ready")
                 else:
-                    restore(root, manual="manual" in sys.argv[2:])
+                    restored = restore(root, manual="manual" in sys.argv[2:])
                     tmux("set-option", "-gq", "@agent_recovery_startup", "ready")
+                    if notify:
+                        manual_feedback("restored" if restored else "no saved layout to restore")
         except ERRORS as error:
             if action in ("save", "restore", "startup"):
                 report_failure(action, error, root)
+                if notify:
+                    manual_feedback(action + " failed; see recovery errors.log")
             if not background:
                 print(f"tmux-agent-indicator recovery: {error}", file=sys.stderr)
                 return 1

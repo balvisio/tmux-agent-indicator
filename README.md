@@ -69,6 +69,9 @@ after installation, and trust the updated Codex hooks in `/hooks`.
 
 Layouts are saved every minute while the status bar is refreshing, and after agent starts and layout
 changes. `prefix` then **Ctrl-S** saves now; `prefix` then **Ctrl-R** restores the latest snapshot.
+Both shortcuts run in the background, keeping terminal input responsive. The requesting terminal
+shows progress and the result, including failures or a busy recovery writer. Saves and restores
+remain serialized; a busy shortcut asks you to retry rather than starting another operation.
 `ssh-reconnect` panes reopen their saved destination. Run the installer on remote hosts too if their
 tmux windows need recovery. Ordinary shell commands are not replayed.
 
@@ -295,9 +298,15 @@ bind -T off  F12 run-shell "~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-pas
 
 The status bar turns orange while keys go through; agent window colours keep their states. Press
 the same key to restore local controls. Exiting `ssh-reconnect` also restores them; plain `ssh`
-is checked on each sweep, normally within five seconds. Passthrough stays on during reconnection. Local mouse clicks and clicks in an already-routed plain
-SSH pane bypass the routing helper, so text selection does not wait for its state lock.
+is checked on each sweep, normally within five seconds. Passthrough stays on during reconnection.
+Local clicks and clicks in an already-routed SSH pane bypass the routing helper, including
+`ssh-reconnect` panes. Changes run in the background with a separate routing lock, so agent updates
+cannot hold up switching windows. Each automatic change rechecks the selected pane when tmux applies it.
 Both prefix keys and the key table return to their previous settings.
+Dragging still selects text for copying in a plain SSH terminal while passthrough is on.
+Applications that request mouse input, including a remote tmux, receive the drag themselves.
+Manual keyboard toggles read their settings in one tmux call and finish before the next key is
+handled, so a prefix typed immediately afterward reaches the intended tmux.
 
 To change the bar colour, add this to the same file, setting both `bg` and `fill` to your colour:
 
@@ -784,9 +793,10 @@ with an explicitly null `transcript_path`, so a transient helper cannot replace 
 conversation's colour, completion, or recovery identity. Non-persisted Codex sessions are not tracked.
 
 Claude does not fire `Stop` when a turn is interrupted. The tmux plugin binds Ctrl+C to forward
-the key normally, then clear `running` or `needs-input` state in that Claude pane. It preserves
-custom Ctrl+C bindings; if you have one, append
-`run-shell '~/.tmux/plugins/tmux-agent-indicator/scripts/pane-interrupt.sh "#{pane_id}"'`
+the key normally, then clear `running` or `needs-input` state in that Claude pane in the background.
+Cleanup captures the interrupted turn, so waiting for the state lock cannot clear a newer turn.
+It preserves custom Ctrl+C bindings; if you have one, append
+`run-shell -b '~/.tmux/plugins/tmux-agent-indicator/scripts/pane-interrupt.sh "#{pane_id}" "#{@agent-indicator-interrupt}"'`
 after its key-forwarding command. This fallback covers Ctrl+C sent through tmux, not cancellation
 through Escape, another client, or an external signal. Codex uses its native
 [Interrupt hook](https://learn.chatgpt.com/docs/hooks#interrupt).
@@ -797,6 +807,10 @@ The installer copies `plugins/opencode-tmux-agent-indicator.js` to `~/.config/op
 - `session.status` (busy) -> `running`
 - `permission.updated` -> `needs-input`
 - `session.idle` -> `done`
+
+OpenCode queues indicator updates in order without waiting for tmux before continuing its own
+event or tool handlers. Successful duplicates are skipped, and a failed update can be retried.
+Restart an existing OpenCode session after updating its plugin to load this behavior.
 
 To install manually without the installer, copy the plugin file:
 

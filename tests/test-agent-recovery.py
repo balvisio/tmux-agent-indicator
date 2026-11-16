@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import pty
+import select
 import shlex
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +91,10 @@ os.execvp(kind, [kind, *args])
         neighbors = [work / "neighbor-1", work / "neighbor-2"]
         clients = []
         terminals = []
+        client_masters = {}
+        client_output = {}
+        readers = []
+        stop_readers = threading.Event()
 
         def t(*args, check=True):
             result = subprocess.run(["tmux", "-S", str(sock), *args], env=env,
@@ -136,11 +142,24 @@ os.execvp(kind, [kind, *args])
         def attach(session):
             master, slave = pty.openpty()
             terminals.extend((master, slave))
+            output = bytearray()
+            def drain():
+                while not stop_readers.is_set():
+                    if select.select([master], [], [], .1)[0]:
+                        try:
+                            output.extend(os.read(master, 65536))
+                        except OSError:
+                            return
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            readers.append(reader)
             client_env = {key: value for key, value in env.items() if key not in ("TMUX", "TMUX_PANE")}
             client_env["TERM"] = "xterm-256color"
             client = subprocess.Popen(["tmux", "-S", str(sock), "attach-session", "-t", session],
                                       env=client_env, stdin=slave, stdout=slave, stderr=slave)
             clients.append(client)
+            client_masters[client.pid] = master
+            client_output[client.pid] = output
             wait_for(lambda: str(client.pid) in t("list-clients", "-F", "#{client_pid}").splitlines())
             return client
 
@@ -324,6 +343,66 @@ assert recovery.state_dir() != first
                 wait_for(restored)
                 assert client_sessions() == expected_sessions, client_sessions()
             restore_script.write_text(restore_source)
+
+            # Exercise actual shortcuts through an attached terminal while
+            # Resurrect is deliberately paused, including lock-busy feedback.
+            names = dict(line.split('\t') for line in
+                         t('list-clients', '-F', '#{client_pid}\t#{client_name}').splitlines())
+            target = names[str(terminal.pid)]
+            master = client_masters[terminal.pid]
+            t('set', '-t', 'work', 'prefix', 'C-b')
+            t('bind', '-n', 'F11', 'set', '-g', '@recovery-key-responsive', 'yes')
+            previous_status = t('show', '-gqv', 'status-right')
+            t('set', '-g', 'status-right', '')
+            save_script = plugins / 'tmux-resurrect/scripts/save.sh'
+            save_source = save_script.read_text()
+            scripts = {'save': (save_script, save_source), 'restore': (restore_script, restore_source)}
+            def messages():
+                return t('show-messages', '-t', target)
+            for action, key, completed in (('save', b'\x13', 'saved'), ('restore', b'\x12', 'restored')):
+                script, original_source = scripts[action]
+                real = script.with_name(action + '-shortcut-real.sh')
+                real.write_text(original_source)
+                started = work / (action + '-shortcut-started')
+                release = work / (action + '-shortcut-release')
+                with (latest.parent / 'lock').open('a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    script.write_text('#!/bin/sh\n' + 'echo started >> ' + shlex.quote(str(started)) + '\n'
+                        'while [ ! -f ' + shlex.quote(str(release)) + ' ]; do sleep 0.1; done\n'
+                        'exec bash ' + shlex.quote(str(real)) + ' "$@"\n')
+                busy = 'Recovery: another save or restore is running; try again'
+                count = messages().count(busy)
+                other_start = len(client_output[editor.pid])
+                try:
+                    os.write(master, b'\x02' + key)
+                    wait_for(started.exists)
+                    t('set', '-g', '@recovery-key-responsive', '')
+                    os.write(master, b'\033[23~')
+                    wait_for(lambda: t('show', '-gqv', '@recovery-key-responsive') == 'yes', seconds=2)
+                    os.write(master, b'\x02' + key)
+                    wait_for(lambda: messages().count(busy) > count)
+                    assert started.read_text().splitlines() == ['started'], 'overlapping recovery operations'
+                finally:
+                    release.touch()
+                wait_for(lambda: 'Recovery: ' + completed in messages())
+                assert b'Recovery: ' + completed.encode() not in client_output[editor.pid][other_start:], 'feedback went to the other client'
+                assert client_sessions() == expected_sessions
+                script.write_text(original_source)
+            with (latest.parent / 'lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                save_script.write_text('#!/bin/sh\necho "manual failure fixture" >&2\nexit 1\n')
+            os.write(master, b'\x02\x13')
+            wait_for(lambda: 'Recovery: save failed; see recovery errors.log' in messages())
+            assert 'manual failure fixture' in (latest.parent / 'errors.log').read_text()
+            assert all(value == '0' for value in t('list-panes', '-a', '-F', '#{pane_in_mode}').splitlines())
+            save_script.write_text(save_source)
+            wait_for(lambda: run(str(recovery), 'save').returncode == 0
+                     and not t('show', '-gqv', '@agent_recovery_warning'))
+            count = messages().count('Recovery: saved')
+            run(str(recovery), 'save', '--notify-client', target, '--notify-pid', '0')
+            assert messages().count('Recovery: saved') == count, 'a reused client name received stale feedback'
+            t('set', '-g', 'status-right', previous_status)
+            print('PASS: recovery shortcuts keep keys responsive, serialize work, and report results to their requesting client', flush=True)
             for client in (terminal, editor):
                 name = t("list-clients", "-F", "#{client_pid}\t#{client_name}")
                 for line in name.splitlines():
@@ -497,6 +576,9 @@ sys.exit(recovery.main())
                 if client.poll() is None:
                     client.terminate()
                 client.wait(timeout=5)
+            stop_readers.set()
+            for reader in readers:
+                reader.join(timeout=2)
             for terminal in terminals:
                 os.close(terminal)
             for neighbor in neighbors:

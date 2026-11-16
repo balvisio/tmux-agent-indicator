@@ -61,6 +61,8 @@ window, and a process scan must not overwrite newer agent state.
 The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
 process inside the test pane. They verify early and late answers, stale status, parallel tools,
 duplicate questions, interruption, timer replacement, and yellow/magenta styles and bell counts.
+A parallel tool observing the same unanswered question after its deadline must confirm the alert
+before superseding the reader's older sample, with no lost or duplicate bell.
 On macOS, the status fixtures use UTC process timestamps while readers run in other time zones.
 Codex fixtures render dialogs and the working composer in isolated tmux panes. They check that a
 missed dialog stays yellow and silent, while an unanswered dialog alerts once after the grace.
@@ -124,6 +126,12 @@ The mouse test sends terminal mouse events through two isolated, nested tmux ser
 local and remote status-bar clicks, split-pane clicks, manual toggles and stale selections. A local
 click followed by a keyboard event must respond while the state writer is locked, so selecting
 text cannot queue behind an unnecessary SSH routing helper.
+Switching into SSH and back must also respond while either the state or routing lock is held.
+The test pauses routing immediately before applying its settings, then changes the selected pane;
+both entering and leaving passthrough must reject that stale update.
+In passthrough, dragging in a plain SSH pane must copy the selected text in both emacs and vi
+copy modes. A nested tmux must receive the drag and run its own copy command instead. Clipboard
+commands in these fixtures write only to temporary files.
 For a visual check, enable the README's F12 bindings in an isolated test session: the bar should turn
 orange while agent titles keep their colours, then return to its original style when passthrough ends.
 
@@ -335,6 +343,8 @@ stay waiting, and a new hook in the replacement pane must be accepted under its 
 `test-hammerspoon-dots.py` uses Lua with a mock Hammerspoon API and an isolated tmux server. It rejects
 synchronous shell calls and checks that cached menus still open while a local query is pending,
 with no accumulated polls. Timeout, late-callback, and recovery cases protect the cached snapshot.
+The SSH checks use `ssh -G` with an interactive-style configuration: probes must preserve a configured
+control socket (or its explicit absence) while disabling new masters, persistence, forks, and prompts.
 It also checks
 named/indexed/RGB colors, actual current/inactive/inherited styles, remote probe output, palette-only
 redraws, and menu colors. SSH-only segments must keep excluding container agents, and changing a
@@ -396,3 +406,34 @@ Transient Codex threads must not claim the terminal's state: the grouping tests 
 hooks with a visible review waiting for input, and verify no state, review, or completion changes.
 The recovery fixture emits helper SessionStart, UserPromptSubmit, and SessionEnd hooks from the same
 Codex process and checks that the visible conversation remains the saved recovery target.
+
+### Responsive client actions
+
+Run `python3 tests/test-client-actions.py`. A real attached terminal sends Ctrl+C followed by
+another bound key while the state lock is held. Both keys must be handled before cleanup can
+acquire the lock, including when the captured turn token begins with zero. A delayed interrupt
+must not clear a new turn. The grouping tests also cover permission/resume within the same turn,
+completed work, replaced agents, and replaced panes.
+
+The same client test switches two attached terminals independently, including session names
+with spaces, punctuation, and literal tmux formats. Native session hooks must acknowledge only
+the session that the triggering client left. Window-only switches and config reloads must not
+re-acknowledge an older session, and detaching a client must remove its bookkeeping. Session-dot acknowledgement follows
+the session ID across renames and clears on new work or reset. No session-switch shell is launched.
+Switching into a session occupied by a more recently active terminal must still use the event's
+client. Closing the old session must not produce a missing-target error. Sourcing the native-hook
+helper must not change its caller's shell options.
+
+`tests/test-ssh-passthrough.sh` and `python3 tests/test-ssh-mouse.py` check saved local/inherited
+prefixes and key tables, rapid mouse routing, stale selections, and manual key ordering.
+The manual helper batches its reads rather than launching a client for each option.
+
+`python3 tests/test-agent-recovery.py` pauses actual Resurrect saves and restores after invoking
+their keyboard shortcuts. The next key must work while recovery is paused; a second request
+must report busy without starting overlapping work. Success and failure feedback belongs to
+the requesting client, failure details remain logged, and no failure enters pane view mode.
+
+Run `node tests/test-opencode-plugin.js` to hold the indicator's subprocess promise unresolved.
+OpenCode handlers must still return immediately, with updates applied in order and without
+overlap or redundant off resets. Duplicate successes are skipped; failures permit retries and
+do not break subsequent updates.

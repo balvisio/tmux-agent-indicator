@@ -47,7 +47,9 @@ tmux_unset_env "TMUX_AGENT_ANIMATION_FRAME"
 # so no capture/restore of the previously active pane is needed)
 while IFS= read -r pane_id; do
     [ -z "$pane_id" ] && continue
-    tmux set-option -p -t "$pane_id" window-style "bg=default" 2>/dev/null || true
+    tmux set-option -p -t "$pane_id" window-style "bg=default" \; \
+        set-option -pqu -t "$pane_id" @agent-indicator-interrupt \; \
+        set-option -pqu -t "$pane_id" @agent-indicator-input-pending 2>/dev/null || true
 done < <(tmux list-panes -a -F '#{pane_id}')
 
 # Restore saved window options and reset borders
@@ -64,6 +66,13 @@ while IFS= read -r window_id; do
 done < <(tmux list-windows -a -F '#{window_id}')
 
 tmux set-option -gqu @agent-indicator-notifications
+
+session_commands=()
+while IFS= read -r session_id; do
+    [ -n "$session_id" ] || continue
+    session_commands+=(set-option -qu -t "$session_id" @agent-indicator-session-seen \;)
+done < <(tmux list-sessions -F '#{session_id}')
+[ "${#session_commands[@]}" -eq 0 ] || tmux "${session_commands[@]}"
 
 # Remove all TMUX_AGENT_* env vars
 while IFS= read -r line; do

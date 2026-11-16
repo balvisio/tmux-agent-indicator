@@ -6,6 +6,7 @@ from pathlib import Path
 import pty
 import select
 import shlex
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -71,6 +72,10 @@ def main():
             time.sleep(0.4)
             os.write(master, f"\033[<0;{x};{y}M\033[<0;{x};{y}m".encode())
 
+        def start_drag(x, end, y):
+            time.sleep(0.4)
+            os.write(master, f"\033[<0;{x};{y}M\033[<32;{end};{y}M".encode())
+
         def active():
             return t("display", "-p", "-t", "local:", "#{pane_id}")
 
@@ -118,6 +123,29 @@ def main():
             assert routed("")
             print("PASS: local mouse clicks keep the client responsive while the state writer is locked", flush=True)
 
+            # Routing into SSH must not hold up the next click while an agent
+            # update owns the state lock. Rapidly leaving SSH invalidates the
+            # earlier routing request as well.
+            with lock_path.open("a+") as lock:
+                fcntl.lockf(lock, fcntl.LOCK_EX)
+                click(116, 24)
+                wait_for(lambda: active() == remote_pane, timeout=1)
+                click(2, 24)
+                wait_for(lambda: active() == local_pane, timeout=1)
+            wait_for(lambda: routed(""))
+            print("PASS: switching back from SSH stays responsive during an agent update", flush=True)
+
+            # Even another routing operation cannot block the client's next click.
+            route_lock = Path(f"{outer}.agent-ssh-{server_pid}.lock")
+            with route_lock.open("a+") as lock:
+                fcntl.lockf(lock, fcntl.LOCK_EX)
+                click(116, 24)
+                wait_for(lambda: active() == remote_pane, timeout=1)
+                click(2, 24)
+                wait_for(lambda: active() == local_pane, timeout=1)
+            wait_for(lambda: routed(""))
+            print("PASS: queued SSH routing does not block subsequent mouse events", flush=True)
+
             # Click the SSH entry in the shipped right-hand window list, then return locally.
             click(116, 24)
             wait_for(lambda: active() == remote_pane and routed(remote_pane))
@@ -149,6 +177,43 @@ def main():
             wait_for(lambda: active() == remote_pane and routed(remote_pane))
             print("PASS: clicking between local and SSH split panes switches controls", flush=True)
 
+            # Pause each automatic change after its initial selection check but
+            # before tmux applies it. A newer selection must win in both directions.
+            wrapper_dir = work / "bin"
+            wrapper_dir.mkdir()
+            ready, release = work / "route-ready", work / "route-release"
+            wrapper = wrapper_dir / "tmux"
+            wrapper.write_text("#!/usr/bin/env python3\nimport os,sys,time\nfrom pathlib import Path\n"
+                "if sys.argv[1:] == ['source-file', '-']:\n"
+                f"    Path({str(ready)!r}).touch()\n"
+                "    deadline = time.monotonic() + 10\n"
+                f"    while not Path({str(release)!r}).exists():\n"
+                "        if time.monotonic() >= deadline: sys.exit(1)\n"
+                "        time.sleep(.02)\n"
+                f"os.execv({shutil.which('tmux')!r}, [{shutil.which('tmux')!r}, *sys.argv[1:]])\n")
+            wrapper.chmod(0o755)
+            session = t("display", "-p", "-t", "local:", "#{session_id}")
+            route_env = dict(env, TMUX=f"{outer},{server_pid},0",
+                             PATH=str(wrapper_dir) + os.pathsep + env["PATH"])
+            for target, replacement in ((remote_pane, local_pane), (local_pane, remote_pane)):
+                t("run-shell", shlex.join([helper, "off", session]))
+                if target == local_pane:
+                    t("run-shell", shlex.join([helper, "on", session, remote_pane]))
+                t("select-window", "-t", target)
+                ready.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                delayed = subprocess.Popen([helper, "auto", session, target], env=route_env,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    wait_for(ready.exists)
+                    t("select-window", "-t", replacement)
+                finally:
+                    release.touch()
+                    out, err = delayed.communicate(timeout=10)
+                assert delayed.returncode == 0, (out, err)
+                assert routed("" if target == remote_pane else remote_pane)
+            print("PASS: switching panes during routing cannot apply stale keyboard settings", flush=True)
+
             # Manual F12 still works and an old click cannot reroute a new selection.
             os.write(master, b"\033[24~")
             wait_for(lambda: routed(""))
@@ -157,6 +222,70 @@ def main():
             os.write(master, b"\033[24~")
             wait_for(lambda: routed(remote_pane))
             print("PASS: manual toggling survives and stale clicks are ignored", flush=True)
+
+            # A manual toggle must not detach from its binding after the normal
+            # state-hook timeout: its next key must use the restored key table.
+            t("set", "-g", "@mouse-responsive", "")
+            with route_lock.open("a+") as lock:
+                fcntl.lockf(lock, fcntl.LOCK_EX)
+                os.write(master, b"\033[24~\033[23~")
+                time.sleep(2.3)
+                assert not t("show", "-gqv", "@mouse-responsive")
+                assert routed(remote_pane)
+            wait_for(lambda: routed("") and t("show", "-gqv", "@mouse-responsive") == "yes")
+            print("PASS: the key after a contended manual toggle uses the restored local table", flush=True)
+
+            # A plain SSH terminal does not request mouse reporting. Passthrough
+            # must still enter local copy mode on drag and copy on mouse release.
+            # The clipboard command writes only inside this disposable fixture.
+            fake_ssh = work / "ssh"
+            shutil.copyfile(shutil.which("sleep"), fake_ssh)
+            fake_ssh.chmod(0o755)
+            plain = t("new-window", "-t", "local:", "-n", "plain-ssh", "-P", "-F", "#{pane_id}",
+                      "printf '\\033[2J\\033[Hcopy-me please\\n'; exec "
+                      + shlex.join([str(fake_ssh), "300"]))
+            wait_for(lambda: t("display", "-p", "-t", plain, "#{pane_current_command}") == "ssh")
+            copied = work / "copied"
+            t("set", "-s", "copy-command", "cat > " + shlex.quote(str(copied)))
+            for table in ("copy-mode", "copy-mode-vi"):
+                t("bind", "-T", table, "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel")
+            click(2, 1)
+            wait_for(lambda: routed(plain))
+            assert t("display", "-p", "-t", plain, "#{mouse_any_flag}") == "0"
+            for mode in ("emacs", "vi"):
+                t("set", "-w", "-t", plain, "mode-keys", mode)
+                copied.unlink(missing_ok=True)
+                start_drag(1, 8, 1)
+                wait_for(lambda: t("display", "-p", "-t", plain, "#{pane_in_mode}") == "1")
+                os.write(master, b"\033[<0;8;1m")
+                wait_for(lambda: copied.exists() and copied.read_text().strip() == "copy-me")
+                assert t("show-buffer") == "copy-me"
+                wait_for(lambda: t("display", "-p", "-t", plain, "#{pane_in_mode}") == "0")
+                assert routed(plain), "copying changed SSH keyboard routing"
+            print("PASS: plain SSH supports drag-to-copy in both copy modes while passthrough remains active", flush=True)
+
+            # Mouse-aware SSH applications still receive the drag. For nested
+            # tmux, only the remote server should select and invoke its copy command.
+            remote_copied = work / "remote-copied"
+            remote_content = t("display", "-p", "-t", "remote:0", "#{pane_id}", socket=inner)
+            t("respawn-pane", "-k", "-t", remote_content,
+              "printf '\\033[2J\\033[Hremote-copy please\\n'; exec sleep 300", socket=inner)
+            t("set", "-s", "copy-command", "cat > " + shlex.quote(str(remote_copied)), socket=inner)
+            t("bind", "-T", "copy-mode", "MouseDragEnd1Pane", "send-keys", "-X", "copy-pipe-and-cancel", socket=inner)
+            t("select-window", "-t", remote_pane)
+            t("select-pane", "-t", remote_pane)
+            wait_for(lambda: "remote-copy please" in t("capture-pane", "-p", "-t", remote_pane))
+            click(2, 1)
+            wait_for(lambda: routed(remote_pane))
+            copied.unlink()
+            start_drag(1, 12, 1)
+            wait_for(lambda: t("display", "-p", "-t", remote_content, "#{pane_in_mode}", socket=inner) == "1")
+            assert t("display", "-p", "-t", remote_pane, "#{pane_in_mode}") == "0"
+            os.write(master, b"\033[<0;12;1m")
+            wait_for(lambda: remote_copied.exists() and remote_copied.read_text().strip() == "remote-copy")
+            assert not copied.exists(), "remote selection invoked the local clipboard command"
+            assert routed(remote_pane)
+            print("PASS: nested tmux receives mouse selection and copies remotely without entering local copy mode", flush=True)
         except Exception:
             print("outer panes:", t("list-panes", "-a", "-F",
                   "#{pane_id} #{window_index} #{pane_active} #{pane_width}x#{pane_height} #{@ssh_reconnect_host}"))

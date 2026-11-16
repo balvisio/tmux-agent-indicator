@@ -201,9 +201,9 @@ hs = {
             local key, setting = value:match('^(%w+)=(.*)$')
             if key then options[key] = setting end
         end
-        assert(options.ControlMaster == 'no' and options.ControlPath == 'none'
+        assert(options.ControlMaster == 'no' and options.ControlPath == nil
             and options.ControlPersist == 'no' and options.ForkAfterAuthentication == 'no',
-            'background SSH masters can retain task pipes and freeze Hammerspoon')
+            'SSH must preserve configured socket reuse without creating background masters')
         local task = {callback = callback, args = args,
             start = function(self) self.running = startTasks; return startTasks end,
             isRunning = function(self) return self.running end,

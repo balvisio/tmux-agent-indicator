@@ -214,6 +214,15 @@ class Questions:
                     if was_shown:
                         self.started[pane] = question
                     return "running"
+                if not was_shown and self.now >= question["deadline"]:
+                    # This newer observation can supersede the reader's final
+                    # sample while both wait for the writer lock. Confirm the
+                    # still-open question here rather than losing its alert
+                    # when that older sample is rejected as stale.
+                    question["shown"] = True
+                    question["next_check"] = self.now + 5
+                    self.silent = False
+                    return "needs-input"
                 return None
             if observed != "answered" and not matching:
                 return None

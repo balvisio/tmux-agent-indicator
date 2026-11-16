@@ -71,13 +71,14 @@ local PLUGIN_DIR = HOME .. "/.tmux/plugins/tmux-agent-indicator"
 local SOUND_SCRIPT = PLUGIN_DIR .. "/scripts/agent-sound.sh" -- plays Ping / Glass, honours MODE_FILE
 local slackBadge, slackBadgeNote
 local SSH = PLUGIN_DIR .. "/scripts/vpn-guard.py"
--- No prompts or background masters: ControlPersist can retain an hs.task output pipe after
+-- Reuse an existing connection through the user's ControlPath, but never create a master
+-- or fork. A newly started background master could retain an hs.task output pipe after
 -- the probe exits, blocking Hammerspoon's main thread while it waits for EOF.
--- Override interactive-login settings without changing the user's SSH configuration.
+-- Without an existing connection, SSH falls back to a standalone, noninteractive attempt.
 local SSH_OPTS = {
     "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
     "-o", "RemoteCommand=none", "-o", "RequestTTY=no", "-o", "LogLevel=ERROR",
-    "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
+    "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
 }
 
 local MODES = { on = "On", dnd = "Do Not Disturb" }

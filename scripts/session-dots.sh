@@ -61,16 +61,6 @@ while IFS= read -r line; do
     [ -n "$session" ] && attention_sessions["$session"]=1
 done < <(tmux show-environment -g 2>/dev/null | grep '^TMUX_AGENT_PANE_.*_STATE=' || true)
 
-# Clean up seen markers for sessions that no longer need attention
-while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    seen_session="${line#TMUX_AGENT_SESSION_SEEN_}"
-    seen_session="${seen_session%%=*}"
-    if [ -z "${attention_sessions[$seen_session]:-}" ]; then
-        tmux set-environment -gu "TMUX_AGENT_SESSION_SEEN_${seen_session}" 2>/dev/null || true
-    fi
-done < <(tmux show-environment -g 2>/dev/null | grep '^TMUX_AGENT_SESSION_SEEN_' || true)
-
 # Color helpers
 color_open() {
     local color="$1"
@@ -91,11 +81,15 @@ if [ -n "$DOTS_COLOR" ]; then
     result="#[fg=${DOTS_COLOR}]"
 fi
 
-while IFS= read -r session; do
+while IFS='|' read -r session_id seen session; do
     [ -z "$session" ] && continue
+    # Session-scoped markers follow renames and disappear with their session.
+    if [ -n "$seen" ] && [ -z "${attention_sessions[$session]:-}" ]; then
+        tmux set-option -qu -t "$session_id" @agent-indicator-session-seen 2>/dev/null || true
+        seen=''
+    fi
     has_attention=""
     if [ "$session" != "$current" ] && [ -n "${attention_sessions[$session]:-}" ]; then
-        seen=$(tmux show-environment -g "TMUX_AGENT_SESSION_SEEN_${session}" 2>/dev/null | sed 's/^[^=]*=//' || true)
         [ "$seen" != "1" ] && has_attention=1
     fi
 
@@ -110,7 +104,7 @@ while IFS= read -r session; do
     else
         result+="${INACTIVE_SYMBOL}"
     fi
-done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+done < <(tmux list-sessions -F '#{session_id}|#{@agent-indicator-session-seen}|#{session_name}' 2>/dev/null)
 
 if [ -n "$DOTS_COLOR" ]; then
     result+="#[default]"
