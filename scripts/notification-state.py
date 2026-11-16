@@ -434,8 +434,8 @@ def tmux_commands(commands):
     def quote(value):
         return '"' + ''.join(escapes.get(char, char) for char in value) + '"'
     source = "\n".join(" ".join(quote(arg) for arg in command) for command in commands) + "\n"
-    subprocess.run(["tmux", "source-file", "-"], input=source, text=True,
-                   stdout=subprocess.PIPE, check=True, timeout=5)
+    return subprocess.run(["tmux", "source-file", "-"], input=source, text=True,
+                          stdout=subprocess.PIPE, check=True, timeout=5).stdout
 
 
 def option_snapshot():

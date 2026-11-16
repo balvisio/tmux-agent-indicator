@@ -295,7 +295,8 @@ bind -T off  F12 run-shell "~/.tmux/plugins/tmux-agent-indicator/scripts/ssh-pas
 
 The status bar turns orange while keys go through; agent window colours keep their states. Press
 the same key to restore local controls. Exiting `ssh-reconnect` also restores them; plain `ssh`
-is checked on each sweep, normally within five seconds. Passthrough stays on during reconnection.
+is checked on each sweep, normally within five seconds. Passthrough stays on during reconnection. Local mouse clicks and clicks in an already-routed plain
+SSH pane bypass the routing helper, so text selection does not wait for its state lock.
 Both prefix keys and the key table return to their previous settings.
 
 To change the bar colour, add this to the same file, setting both `bg` and `fill` to your colour:
@@ -361,16 +362,25 @@ Writers acquire the lock in queue order. After two seconds of contention, a hook
 and its detached retry keeps waiting; the update is applied when earlier writers finish. This keeps
 agent hooks responsive without dropping or reordering state transitions. Codex resolves its pane
 before detaching, and queued events are discarded if that pane was replaced or the server stopped.
-Full sweeps lock one window update at a time so hooks can run between updates. The empty lock file
-next to the tmux socket is intentional and must not be deleted while that server has active writers.
+Full sweeps collect process information before taking the writer lock, then batch their window
+reads and changed styles in one apply phase. Overlapping periodic sweeps (`sweep --if-idle`) exit
+immediately, including while the first sweep is waiting for the writer lock. Explicit sweeps wait
+and scan fresh state, so SSH lifecycle refreshes are not lost. Focus hooks run in the
+background and recheck the selected pane after acquiring the lock, so navigation does not wait for
+bookkeeping. The empty lock files next to the tmux socket are intentional and must not be deleted
+while that server has active writers.
 
 #### Presence labels
 
 `scripts/agent-present.sh sweep` maintains blue idle styling, `@agent_present`, `@agent_label`, and
-`@ssh_host` for integrations such as the Hammerspoon dots. It uses `scripts/pane-processes.sh` to
-require both a matching terminal and ancestry from the pane process. This prevents container
-processes with the same `pts/N` names from labeling unrelated host shells as agents or SSH sessions.
-The plugin indicator uses the same ancestry filter for its process-detection fallback.
+`@ssh_host` for integrations such as the Hammerspoon dots. Each sweep uses one process snapshot
+and reads Claude session names once, regardless of the number of windows. Detection requires both
+a matching terminal and ancestry from the pane process. This prevents container processes with the
+same `pts/N` names from labeling unrelated host shells as agents or SSH sessions. The plugin indicator
+uses `scripts/pane-processes.sh` with the same ancestry rule for its process-detection fallback.
+The shipped configuration runs presence sweeps on status refresh (normally every five seconds),
+without starting another full scan on each window change. A moved, closed or respawned pane invalidates
+its window's presence snapshot; the next sweep refreshes those labels using the new process identity.
 
 
 ### Agent limits

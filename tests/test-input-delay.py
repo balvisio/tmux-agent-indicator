@@ -628,6 +628,10 @@ class TmuxTest(unittest.TestCase):
         self.assertEqual(self.state(), "needs-input")
 
     def test_pending_question_blocks_sibling_completion(self):
+        # This checks grouping, not the grace deadline. Pane creation and the
+        # sibling hook can consume three seconds on a slow process-launch host;
+        # late answers then require a periodic sweep, which this fixture omits.
+        self.tmux("set", "-g", "@agent-indicator-input-delay", "10")
         self.native("waiting")
         self.hook("needs-input", "PermissionRequest")
         sibling = self.tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "/bin/bash --noprofile --norc")

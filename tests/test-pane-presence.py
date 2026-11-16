@@ -23,15 +23,22 @@ def main():
         fixture = Path(directory)
         snapshot = fixture / "processes"
         ps = fixture / "ps"
-        ps.write_text('#!/bin/sh\ncat "$AGENT_TEST_PS_FILE"\n')
+        ps.write_text('''#!/bin/sh
+if [ "$1" = -t ]; then
+    awk -v tty="$2" '$3 == tty { $3=""; print }' "$AGENT_TEST_PS_FILE"
+else
+    cat "$AGENT_TEST_PS_FILE"
+fi
+''')
         ps.chmod(0o755)
         try:
-            pane, root, window = tmux("-f", "/dev/null", "new-session", "-d", "-P", "-F",
-                                      "#{pane_id}|#{pane_pid}|#{window_id}", "-s", "test",
+            pane, root, window, tty = tmux("-f", "/dev/null", "new-session", "-d", "-P", "-F",
+                                      "#{pane_id}|#{pane_pid}|#{window_id}|#{pane_tty}", "-s", "test",
                                       "/bin/bash --noprofile --norc").split("|")
+            tty = tty[5:] if tty.startswith("/dev/") else tty
             path, pid = tmux("display-message", "-p", "#{socket_path}|#{pid}").rsplit("|", 1)
             # A caller may retain an old install path; use this script's own helpers.
-            inside = dict(environment, TMUX=f"{path},{pid},0", TMUX_PANE=pane,
+            inside = dict(environment, HOME=directory, TMUX=f"{path},{pid},0", TMUX_PANE=pane,
                           TMUX_AGENT_INDICATOR_DIR=str(fixture / "missing-install"), AGENT_TEST_PS_FILE=str(snapshot),
                           PATH=directory + os.pathsep + environment["PATH"])
 
@@ -44,11 +51,11 @@ def main():
 
             # Simulate host and container processes sharing a pts/N name.
             # The foreign processes belong to a container, not this pane's tree.
-            unrelated = ("900000001 900000000 /bin/bash\n"
-                         "900000002 900000001 claude\n"
-                         "900000003 900000001 node /bin/codex\n"
-                         "900000004 900000001 ssh wrong-host\n")
-            base = f"{root} 1 /bin/bash\n" + unrelated
+            unrelated = (f"900000001 900000000 {tty} /bin/bash\n"
+                         f"900000002 900000001 {tty} claude\n"
+                         f"900000003 900000001 {tty} node /bin/codex\n"
+                         f"900000004 900000001 {tty} ssh wrong-host\n")
+            base = f"{root} 1 {tty} /bin/bash\n" + unrelated
             snapshot.write_text(base)
             tmux("set", "-w", "@agent_present", "1")
             tmux("set", "-w", "@agent_label", "claude")
@@ -62,9 +69,9 @@ def main():
             assert not run("indicator.sh"), "container leaked into the fallback icon"
             print("PASS: colliding container ttys cannot label or color a plain host shell")
 
-            snapshot.write_text(base + f"900000010 {root} claude\n"
-                                "900000011 900000010 node /bin/codex\n"
-                                f"900000012 {root} ssh -p 2222 correct-host\n")
+            snapshot.write_text(base + f"900000010 {root} {tty} claude\n"
+                                f"900000011 900000010 {tty} node /bin/codex\n"
+                                f"900000012 {root} {tty} ssh -p 2222 correct-host\n")
             run("agent-present.sh", "sweep")
             assert option("@agent_present") == "1"
             assert "🤖" in option("@agent_label") and "🧠" in option("@agent_label")
@@ -74,14 +81,15 @@ def main():
             print("PASS: real descendant agents and SSH connections still label their own pane")
 
             # Detection must also inspect another pane in the same window.
-            second, second_root = tmux("split-window", "-d", "-P", "-F", "#{pane_id}|#{pane_pid}",
+            second, second_root, second_tty = tmux("split-window", "-d", "-P", "-F", "#{pane_id}|#{pane_pid}|#{pane_tty}",
                                        "-t", pane, "/bin/bash --noprofile --norc").split("|")
-            snapshot.write_text(base + f"{second_root} 1 /bin/bash\n900000020 {second_root} codex\n")
+            second_tty = second_tty[5:] if second_tty.startswith("/dev/") else second_tty
+            snapshot.write_text(base + f"{second_root} 1 {second_tty} /bin/bash\n900000020 {second_root} {second_tty} codex\n")
             run("agent-present.sh", "sweep")
             assert "🧠" in option("@agent_label") and "🤖" not in option("@agent_label")
             assert "🧠" in run("indicator.sh"), "inactive sibling agent lost its icon"
             assert not option("@ssh_host")
-            snapshot.write_text(base + f"{second_root} 1 /bin/bash\n")
+            snapshot.write_text(base + f"{second_root} 1 {second_tty} /bin/bash\n")
             run("agent-present.sh", "sweep")
             assert not option("@agent_present") and not option("@agent_label")
             assert not run("indicator.sh")

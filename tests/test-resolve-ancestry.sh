@@ -36,6 +36,7 @@ run_pane_hook() {
     done
     result=$(cat "$completion")
     [ "$result" = 0 ] || fail "hook in $source did not complete successfully: $result"
+    wait_for_state_writers
 }
 
 for mode in stale missing; do

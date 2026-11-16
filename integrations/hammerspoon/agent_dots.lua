@@ -43,14 +43,15 @@
 -- with "_"; force UTF-8 so the tab-separated formats below survive.
 local TMUX_BIN = "/opt/homebrew/bin/tmux" -- Apple Silicon Homebrew; Intel Homebrew and MacPorts below
 for _, candidate in ipairs({ "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux" }) do
-    if io.open(candidate, "r") then TMUX_BIN = candidate; break end
+    local file = io.open(candidate, "r")
+    if file then file:close(); TMUX_BIN = candidate; break end
 end
-local TMUX = "LC_ALL=en_US.UTF-8 " .. TMUX_BIN .. " -u"
 local ITERM = "com.googlecode.iterm2"
 local VSCODE = "com.microsoft.VSCode"
 local REFRESH = 2 -- seconds, local tmux + clock
 local REMOTE_REFRESH = 3 -- seconds, each VS Code host
 local REMOTE_TIMEOUT = 20 -- seconds before a hung ssh poll is killed
+local LOCAL_TIMEOUT = 10 -- keep a stalled local check from accumulating tasks
 local SSH_EMPTY_COLOR = "#0DBC79" -- Explicit RGB keeps empty SSH titles consistent across terminals.
 local MAX_TITLE_WIDTH = 600 -- points, also limited to 30% of the narrowest connected screen
 -- Settings a user may override from init.lua before the require line, e.g.
@@ -369,13 +370,11 @@ local remoteHostList = {} -- unique hosts in `segments`, sorted
 local KIND_NAME = { VS = "VS Code", SSH = "SSH" }
 local lastJump = nil -- keeps the most recent jump task referenced until it exits
 local REMOTE_B64 = nil
-local refresh, setMode -- defined below, referenced by menu()
-
-local function shell(cmd)
-    local out, ok = hs.execute(cmd)
-    if not ok or not out then return nil end
-    return out
-end
+local refresh, redraw, setMode, syncSshColors, updateSegments -- defined below
+local localWindows, localLinks, localHosts = nil, {}, {}
+local localChecked = false
+local background = {}
+local actionSequence = 0
 
 local function note(line)
     local f = io.open(STATE_FILE, "w")
@@ -388,6 +387,72 @@ end
 
 local function shq(s) -- single-quote for a POSIX shell
     return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+-- Never wait for a process on Hammerspoon's UI thread. One task per polling
+-- channel, including the interval after process exit but before its callback.
+local function startTask(key, executable, args, callback, input)
+    if background[key] then return end
+    -- hs.task without streaming waits until exit before reading its pipes. A
+    -- large ps listing can fill that pipe and prevent exit. Private temporary
+    -- files also preserve UTF-8 bytes, which native streaming chunks can split.
+    local job = { started = os.time(), callback = callback, output = os.tmpname(), errors = os.tmpname() }
+    local function clean()
+        os.remove(job.output)
+        os.remove(job.errors)
+    end
+    job.clean = clean
+    local function complete(code, out, err)
+        if background[key] ~= job then clean(); return end
+        local function read(path)
+            local file = io.open(path, "rb")
+            if not file then return nil end
+            local value = file:read(8 * 1024 * 1024 + 1) or ""
+            file:close()
+            if #value > 8 * 1024 * 1024 then return nil end
+            return value
+        end
+        out, err = read(job.output), read(job.errors)
+        clean()
+        if not out or not err then code, out, err = -1, "", "cannot read task output" end
+        background[key] = nil
+        if callback then
+            local ok, failure = pcall(callback, code, out, err)
+            if not ok then note(key .. " error: " .. tostring(failure)) end
+        end
+    end
+    local command = { "-c", 'out=$1; err=$2; shift 2; exec "$@" >"$out" 2>"$err"',
+        "agent-dots", job.output, job.errors, executable }
+    for _, value in ipairs(args) do command[#command + 1] = value end
+    job.task = hs.task.new("/bin/sh", complete, command)
+    background[key] = job
+    if input and job.task then job.task:setInput(input) end
+    if not job.task or not job.task:start() then complete(-1, "", "cannot start task") end
+end
+
+local function expireTasks()
+    for key, job in pairs(background) do
+        if os.time() - job.started >= LOCAL_TIMEOUT then
+            background[key] = nil -- invalidate callbacks before terminating
+            if job.task:isRunning() then job.task:terminate() end
+            job.clean()
+            if job.callback then
+                local ok, failure = pcall(job.callback, -1, "", "timeout")
+                if not ok then note(key .. " error: " .. tostring(failure)) end
+            end
+        end
+    end
+end
+
+local function tmuxTask(key, args, callback, input)
+    local command = { "LC_ALL=en_US.UTF-8", TMUX_BIN, "-u" }
+    for _, value in ipairs(args) do command[#command + 1] = value end
+    startTask(key, "/usr/bin/env", command, callback, input)
+end
+
+local function actionKey()
+    actionSequence = actionSequence + 1
+    return "action-" .. actionSequence
 end
 
 -- Mode file: "on <epoch>" / "dnd <epoch>" (epoch = when that mode was switched on).
@@ -420,24 +485,33 @@ end
 
 -- Same sounds as a local agent; the script itself stays silent in Do Not Disturb.
 local function play(state)
-    hs.execute(("AGENT_STATE=%s %s"):format(state, shq(SOUND_SCRIPT)))
+    startTask(actionKey(), "/usr/bin/env", { "AGENT_STATE=" .. state, SOUND_SCRIPT })
 end
 
 ---------------------------------------------------------------------------------------------------
 -- Local tmux
 ---------------------------------------------------------------------------------------------------
 
--- Windows with an agent, in index order: { id, index, label, active, state }. nil if tmux is down.
+-- Menus and drawing only read the latest completed snapshot.
 local function agentWindows()
-    local out = shell(TMUX .. " list-windows -a -F '#{window_id}\t#{window_index}\t#{@agent_present}\t#{@agent_label}\t#{window_active}\t#{@agent-indicator-state}\t" .. WINDOW_STYLE .. "'")
-    if not out then return nil end
+    return localWindows
+end
 
-    local windows = {}
+local function parseLocal(out)
+    local windows, links, seen = {}, {}, {}
     for line in out:gmatch("[^\r\n]+") do
-        local id, index, present, label, active, state, style = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-        if id and present == "1" then
-            local w = { id = id, index = tonumber(index) or 0, label = label, active = (active == "1"), state = STATES[state] and state or "idle", color = styleColor(style) }
-            table.insert(windows, w)
+        local fields = {}
+        for value in (line .. "\t"):gmatch("([^\t]*)\t") do fields[#fields + 1] = value end
+        local id, index, present, label, active, state, style, host, colorHost, color = table.unpack(fields)
+        if #fields == 10 and id:match("^@%d+$") then
+            if present == "1" then
+                local w = { id = id, index = tonumber(index) or 0, label = label, active = (active == "1"), state = STATES[state] and state or "idle", color = styleColor(style) }
+                table.insert(windows, w)
+            end
+            if not seen[id] and (host ~= "" or colorHost ~= "" or color ~= "") then
+                seen[id] = true
+                links[#links + 1] = { host = host, window = id, colorHost = colorHost, color = color }
+            end
         end
     end
 
@@ -450,28 +524,32 @@ local function agentWindows()
             f:close()
         end
     end
-    return windows
+    return windows, links
+end
+
+local function pollLocal()
+    local format = "#{window_id}\t#{window_index}\t#{@agent_present}\t#{@agent_label}\t#{window_active}\t#{@agent-indicator-state}\t"
+        .. WINDOW_STYLE .. "\t#{@ssh_host}\t#{@ssh_agent_host}\t#{@ssh_agent_color}"
+    tmuxTask("local", { "list-windows", "-a", "-F", format }, function(code, out)
+        localChecked = true
+        if code == 0 then localWindows, localLinks = parseLocal(out)
+        else localWindows, localLinks = nil, {} end
+        updateSegments(false)
+        syncSshColors()
+        redraw()
+    end)
 end
 
 local function jumpTo(w)
     return function()
-        shell(TMUX .. " select-window -t " .. w.id)
+        tmuxTask(actionKey(), { "select-window", "-t", w.id })
         hs.application.launchOrFocusByBundleID(ITERM)
     end
 end
 
 -- SSH windows and their published colors, including disconnected windows needing cleanup.
 local function sshLinks()
-    local out = shell(TMUX .. " list-windows -a -F '#{window_id}\t#{window_index}\t#{@ssh_host}\t#{@ssh_agent_host}\t#{@ssh_agent_color}'") or ""
-    local links, seen = {}, {}
-    for line in out:gmatch("[^\r\n]+") do
-        local id, _, host, colorHost, color = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-        if id and id:match("^@%d+$") and (host ~= "" or colorHost ~= "" or color ~= "") and not seen[id] then
-            seen[id] = true
-            links[#links + 1] = { host = host, window = id, colorHost = colorHost, color = color }
-        end
-    end
-    return links
+    return localLinks
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -481,7 +559,10 @@ end
 -- Hosts VS Code is connected to: the last word of every `ssh …` process whose parent is VS Code's
 -- Remote-SSH extension host (e.g. "ssh -v -T -D 63706 -o ConnectTimeout=60 -o RemoteCommand=none colossus").
 local function vscodeHosts()
-    local out = shell("/bin/ps -axo pid=,ppid=,command=") or ""
+    return localHosts
+end
+
+local function parseHosts(out)
     local cmdByPid, rows = {}, {}
     for line in out:gmatch("[^\r\n]+") do
         local pid, ppid, cmd = line:match("^%s*(%d+)%s+(%d+)%s+(.-)%s*$")
@@ -551,19 +632,35 @@ local function visibleSegments()
 end
 
 -- Publish only display options; local pane states and the plugin's style bookkeeping stay independent.
-local function syncSshColors()
-    local commands = {}
+syncSshColors = function()
+    if background.colors then return end
+    local commands, changes = {}, {}
+    local function quote(value) -- tmux source-file quoting, not shell quoting
+        return '"' .. value:gsub('[\\"$\n\r\t]', {
+            ['\\'] = '\\\\', ['"'] = '\\"', ['$'] = '\\$', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t',
+        }) .. '"'
+    end
     for _, link in ipairs(sshLinks()) do
         local r = remote[link.host]
         local top = highestPriority(windowsForSegment({ kind = "SSH", host = link.host }))
         local color = r and r.ok and (top and top.tmuxColor or SSH_EMPTY_COLOR) or ""
         if link.colorHost ~= link.host or link.color ~= color then
-            commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_host " .. shq(link.host)
-            commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_color " .. shq(color)
+            commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_host " .. quote(link.host)
+            commands[#commands + 1] = "set-option -wq -t " .. link.window .. " @ssh_agent_color " .. quote(color)
+            changes[link.window] = { host = link.host, color = color }
         end
     end
     if #commands > 0 then
-        shell(TMUX .. " " .. table.concat(commands, " \\; "))
+        tmuxTask("colors", { "source-file", "-" }, function(code)
+            if code ~= 0 then return end -- retry on the next refresh
+            for _, link in ipairs(localLinks) do
+                local change = changes[link.window]
+                if change and change.host == link.host then
+                    link.colorHost, link.color = change.host, change.color
+                end
+            end
+            syncSshColors() -- remote state may have changed while this write was in flight
+        end, table.concat(commands, "\n") .. "\n")
     end
 end
 
@@ -644,7 +741,8 @@ local function pollRemote(host)
         r.task = nil
         local ok, e = pcall(applyPoll, host, code, out, err)
         if not ok then note("remote " .. host .. " error: " .. tostring(e)) end
-        refresh()
+        syncSshColors()
+        redraw()
     end, sshArgs(host, "poll " .. mode .. " " .. shq(remoteSshColors())))
     if task and task:start() then
         r.task, r.started = task, os.time()
@@ -654,7 +752,7 @@ local function pollRemote(host)
 end
 
 -- Rebuild the segment list from both sources and poll every distinct host once.
-local function pollAll()
+updateSegments = function(poll)
     local segs, hosts, seen, key = {}, {}, {}, {}
     for _, h in ipairs(vscodeHosts()) do segs[#segs + 1] = { kind = "VS", host = h } end
     local sshHosts = {}
@@ -683,8 +781,18 @@ local function pollAll()
     end
     local changed = (key ~= segmentsKey)
     segments, remoteHostList, segmentsKey = segs, hosts, key -- before polling: a poll callback redraws
-    for _, h in ipairs(hosts) do pollRemote(h) end
-    if changed then refresh() end
+    if poll or changed then
+        for _, h in ipairs(hosts) do pollRemote(h) end
+    end
+    if changed then redraw() end
+end
+
+local function pollAll()
+    expireTasks()
+    startTask("hosts", "/bin/ps", { "-axo", "pid=,ppid=,command=" }, function(code, out)
+        if code == 0 then localHosts = parseHosts(out) end
+        updateSegments(true)
+    end)
 end
 
 -- Select the window in its remote tmux, then bring the matching app forward: VS Code for a VS
@@ -694,7 +802,7 @@ local function jumpRemote(seg, w)
         local t = hs.task.new(SSH, nil, sshArgs(seg.host, ("jump %s %s %s %s"):format(w.spec, shq(w.session), w.id, seg.kind)))
         if t and t:start() then lastJump = t end
         if seg.kind == "SSH" then
-            if seg.window then shell(TMUX .. " select-window -t " .. seg.window) end
+            if seg.window then tmuxTask(actionKey(), { "select-window", "-t", seg.window }) end
             hs.application.launchOrFocusByBundleID(ITERM)
         else
             hs.application.launchOrFocusByBundleID(VSCODE)
@@ -962,7 +1070,7 @@ local function windowsKey(windows)
     return table.concat(parts, ",")
 end
 
--- Built on click, so it always reflects the current state.
+-- Built on click from cached state; opening and tracking a menu never wait on tmux.
 local function menu()
     local mode = readMode()
     local items = {
@@ -980,7 +1088,7 @@ local function menu()
         table.insert(items, { title = entry(w, attrs), fn = jumpTo(w) })
     end
     if not windows then
-        table.insert(items, { title = "tmux is not running", disabled = true })
+        table.insert(items, { title = localChecked and "tmux is not running" or "checking tmux…", disabled = true })
     elseif #windows == 0 then
         table.insert(items, { title = "no agent windows", disabled = true })
     end
@@ -1019,7 +1127,7 @@ local function setExpanded(value, point)
     compactOverride = not value
     panelAnchor = point or hs.mouse.absolutePosition()
     lastKey = nil
-    refresh()
+    redraw()
 end
 
 local function clicked()
@@ -1035,7 +1143,6 @@ local function clicked()
 end
 
 local function draw()
-    syncSshColors()
     local windows = agentWindows() or {} -- tmux down: still show the mode and the clock
     local mode, since = readMode()
 
@@ -1065,12 +1172,19 @@ local function draw()
     note("drawn " .. (panel and "strip " or (compact and "compact " or "expanded ")) .. key)
 end
 
-refresh = function()
+redraw = function()
     local ok, err = pcall(function()
         if slackBadge then slackBadge.sync(readMode()) end
         draw()
     end)
     if not ok then note("error: " .. tostring(err)) end
+end
+
+refresh = function()
+    expireTasks()
+    pollLocal()
+    syncSshColors()
+    redraw()
 end
 
 -- Switch mode; the stopwatch restarts only when the mode actually changes. The remotes pick the new
@@ -1083,7 +1197,7 @@ setMode = function(mode)
         lastKey = nil
         pcall(pollAll)
     end
-    refresh()
+    redraw()
 end
 
 local function bindHotkey(config, purpose, callback)
@@ -1108,7 +1222,18 @@ local function bindHotkey(config, purpose, callback)
     return binding
 end
 
-os.execute("mkdir -p " .. HOME .. "/.cache " .. MODE_DIR)
+for _, path in ipairs({ HOME .. "/.cache", HOME .. "/.local", HOME .. "/.local/state", MODE_DIR }) do
+    hs.fs.mkdir(path)
+end
+local previousShutdown = hs.shutdownCallback
+hs.shutdownCallback = function()
+    for key, job in pairs(background) do
+        background[key] = nil
+        if job.task and job.task:isRunning() then job.task:terminate() end
+        job.clean()
+    end
+    if previousShutdown then previousShutdown() end
+end
 if SETTINGS.slackBadge == true then
     local loaded, result = pcall(function()
         return dofile(PLUGIN_DIR .. "/integrations/hammerspoon/slack_badge.lua").new(PLUGIN_DIR .. "/scripts/slack-badge.js")

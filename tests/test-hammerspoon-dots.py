@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -37,13 +38,27 @@ def main():
         return subprocess.check_output(
             [tmux_bin, "-L", socket, *arguments], env=environment,
             text=True, stderr=subprocess.STDOUT, timeout=8,
-        ).strip()
+        ).rstrip("\n")
 
     with tempfile.TemporaryDirectory(prefix="agent-dots-fixture-") as directory:
         fixture = Path(directory)
         harness = [lua, str(ROOT / "tests/test-hammerspoon-dots.lua"),
                    str(ROOT / "integrations/hammerspoon/agent_dots.lua"), directory]
         subprocess.run(harness, check=True, capture_output=True, text=True)
+        # Real background commands must be able to exceed the native pipe
+        # buffer and retain Unicode without Hammerspoon reading during execution.
+        output, errors = fixture / 'large-output', fixture / 'large-errors'
+        for path in (output, errors):
+            path.touch(mode=0o600)
+        script = (fixture / 'task-wrapper.sh').read_text()
+        payload = "print('🧠' * 100000); import sys; print('x' * 100000, file=sys.stderr)"
+        result = subprocess.run(['/bin/sh', '-c', script, 'fixture', str(output), str(errors),
+                                 sys.executable, '-c', payload], capture_output=True, timeout=8, check=True)
+        assert not result.stdout and not result.stderr
+        assert output.read_text() == '🧠' * 100000 + '\n'
+        assert errors.read_text() == 'x' * 100000 + '\n'
+        assert output.stat().st_mode & 0o777 == 0o600
+        print('PASS: large background output cannot fill task pipes, stays private, and preserves Unicode')
         # An interactive SSH configuration must not make a probe fork or reuse a
         # background master, which could retain Hammerspoon's output pipes.
         ssh = shutil.which("ssh")
@@ -77,7 +92,7 @@ def main():
 
             def check(expected):
                 row = tmux(*arguments).splitlines()[0].split("\t")
-                assert len(row) == 7, row
+                assert len(row) == 10, row
                 assert row[5] == "running", row
                 styles.append(expected + "\t" + row[6])
                 return row[6]
@@ -128,10 +143,9 @@ def main():
             for option in ("window-status-format", "window-status-current-format"):
                 tmux("set", "-g", option, "#{E:@ssh_agent_title_style}#I:#W#F")
             tmux("set", "-w", "-t", ssh_window, "@ssh_host", "colossus")
-            publish = shlex.split((fixture / "ssh-color-command.txt").read_text())
-            publish = publish[publish.index("set-option"):]
-            publish = [ssh_window if value == "@6" else value for value in publish]
-            tmux(*publish)
+            publish = (fixture / "ssh-color-command.txt").read_text().replace(" -t @6 ", f" -t {ssh_window} ")
+            subprocess.run([tmux_bin, "-L", socket, "source-file", "-"], input=publish,
+                           env=environment, text=True, check=True, capture_output=True, timeout=8)
             assert tmux("show", "-wqv", "-t", ssh_window, "@ssh_agent_color") == "magenta"
 
             def title(option="window-status-format"):

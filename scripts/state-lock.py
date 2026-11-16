@@ -25,6 +25,12 @@ def main():
         print("usage: state-lock.py <script> [arguments...]", file=sys.stderr)
         return 2
 
+    # A coalesced sweep stays in the foreground so its owner retains the sweep
+    # lock until the serialized apply phase actually finishes.
+    foreground = sys.argv[1] == "--wait"
+    if foreground:
+        del sys.argv[1]
+
     server = subprocess.check_output(
         ["tmux", "display-message", "-p", "#{socket_path}|#{pid}"],
         text=True, timeout=1,
@@ -82,7 +88,7 @@ def main():
                 break
 
             if time.monotonic() >= deadline:
-                if not detached:
+                if not detached and not foreground:
                     # Hand the ticket to a detached child before returning success.
                     # Closing all standard streams prevents hook runners from waiting
                     # for the child or killing it with the original process group.

@@ -31,9 +31,15 @@ lock_agent_state() {
     if [ "${1:-}" != --agent-state-lock-held ]; then
         local script_dir
         script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [ "${1:-}" = --sweep ] || [ "${1:-}" = --all ]; then
+            exec python3 "$script_dir/state-lock.py" --wait "$0" "$@"
+        fi
         exec python3 "$script_dir/state-lock.py" "$0" "$@"
     fi
     load_state_snapshot
+    if [ "$agent_batch" = true ]; then
+        load_sweep_snapshot
+    fi
     prune_pane_states
 }
 
@@ -56,33 +62,69 @@ clear_pane_state() {
 # Pane IDs survive respawn; recorded states belong to the process that emitted
 # them. Prune under the writer lock before applying hooks, focus, or sweeps.
 prune_pane_states() {
-    local panes line pane_id recorded_pid current_pid dead window_id affected=""
-    panes=$(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_dead} #{window_id}')
-    while IFS= read -r line; do
-        pane_id="${line#TMUX_AGENT_PANE_}"
-        pane_id="${pane_id%%_STATE=*}"
-        recorded_pid=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_PID")
-        current_pid=""; dead=""; window_id=""
-        read -r current_pid dead window_id < <(printf '%s\n' "$panes" | awk -v p="$pane_id" '$1 == p { print $2, $3, $4; exit }') || true
-        if [ -z "$recorded_pid" ] || [ "$current_pid" != "$recorded_pid" ] || [ "$dead" != 0 ]; then
+    local pane_id recorded_pid current_pid dead window_id key
+    local -A current_pids=() current_dead=() current_windows=() affected=()
+    if [ "$agent_batch" = true ]; then
+        for key in "${!agent_panes[@]}"; do
+            case "$key" in
+                *'|pid') pane_id="${key%|pid}"
+                    current_pids["$pane_id"]="${agent_panes[$key]}"
+                    current_dead["$pane_id"]="${agent_panes[$pane_id|dead]}"
+                    current_windows["$pane_id"]="${agent_panes[$pane_id|window]}" ;;
+            esac
+        done
+    else
+        while read -r pane_id current_pid dead window_id; do
+            current_pids["$pane_id"]="$current_pid"
+            current_dead["$pane_id"]="$dead"
+            current_windows["$pane_id"]="$window_id"
+        done < <(tmux list-panes -a -F '#{pane_id} #{pane_pid} #{pane_dead} #{window_id}')
+    fi
+    for key in "${!agent_environment[@]}"; do
+        case "$key" in TMUX_AGENT_PANE_*_STATE) ;; *) continue ;; esac
+        pane_id="${key#TMUX_AGENT_PANE_}"
+        pane_id="${pane_id%_STATE}"
+        recorded_pid="${agent_environment[TMUX_AGENT_PANE_${pane_id}_PID]-}"
+        window_id="${current_windows[$pane_id]-}"
+        if [ -z "$recorded_pid" ] || [ "${current_pids[$pane_id]-}" != "$recorded_pid" ] ||
+           [ "${current_dead[$pane_id]-}" != 0 ]; then
             clear_pane_state "$pane_id"
             if [ -n "$window_id" ]; then
                 reset_pane_style "$pane_id" || true
-                affected="$affected $window_id"
+                affected["$window_id"]=1
             fi
         fi
-    done < <(tmux show-environment -g | grep '^TMUX_AGENT_PANE_.*_STATE=' || true)
-    for window_id in $affected; do
+    done
+    for window_id in "${!affected[@]}"; do
         render_window_state "$window_id"
     done
 }
 
+window_panes() {
+    local window_id="$1" pane_id
+    if [ "$agent_batch" = true ]; then
+        for pane_id in ${agent_windows[$window_id|members]-}; do
+            printf '%s %s\n' "$pane_id" "${agent_panes[$pane_id|dead]}"
+        done
+    else
+        tmux list-panes -t "$window_id" -F '#{pane_id} #{pane_dead}' 2>/dev/null || true
+    fi
+}
+
 # Only live panes participate. A closed or moved pane cannot keep its old window colored.
 window_agent_state() {
-    local window_id="$1" pane_id dead state result=idle
+    local window_id="$1" pane_id dead state busy result=idle
     # Reviews and background shells remain work after an agent finishes replying.
-    if [ "$(tmux display-message -p -t "$window_id" '#{||:#{@agent-indicator-review-pending},#{@agent-indicator-shell-running}}')" = 1 ] &&
-        is_enabled "$(tmux_get_option_or_default @agent-indicator-running-enabled on)"; then
+    if [ "$agent_batch" = true ]; then
+        busy=0
+        if [ "${agent_windows[$window_id|@agent-indicator-review-pending]-}" = 1 ] ||
+           [ "${agent_windows[$window_id|@agent-indicator-shell-running]-}" = 1 ]; then
+            busy=1
+        fi
+    else
+        busy=$(tmux display-message -p -t "$window_id" '#{||:#{@agent-indicator-review-pending},#{@agent-indicator-shell-running}}')
+    fi
+    if [ "$busy" = 1 ] && is_enabled "$(tmux_get_option_or_default @agent-indicator-running-enabled on)"; then
         result=running
     fi
     while read -r pane_id dead; do
@@ -93,13 +135,17 @@ window_agent_state() {
             running) result=running ;;
             done) [ "$result" != idle ] || result=done ;;
         esac
-    done < <(tmux list-panes -t "$window_id" -F '#{pane_id} #{pane_dead}' 2>/dev/null || true)
+    done < <(window_panes "$window_id")
     printf '%s\n' "$result"
 }
 
 render_window_state() {
     local window_id="$1" state bg fg border active_window style_active saved
-    tmux list-windows -a -F '#{window_id}' | grep -qxF "$window_id" || return 0
+    if [ "$agent_batch" = true ]; then
+        [ -n "${agent_windows[$window_id|members]-}" ] || return 0
+    else
+        tmux list-windows -a -F '#{window_id}' | grep -qxF "$window_id" || return 0
+    fi
     state=$(window_agent_state "$window_id")
     if [ "$state" = idle ]; then
         clear_window_title_style "$window_id"
@@ -107,7 +153,11 @@ render_window_state() {
     else
         bg=$(tmux_get_option_or_default "@agent-indicator-${state}-window-title-bg" "$(default_state_title_bg "$state")")
         fg=$(tmux_get_option_or_default "@agent-indicator-${state}-window-title-fg" "$(default_state_title_fg "$state")")
-        active_window=$(tmux display-message -p '#{window_id}')
+        if [ "$agent_batch" = true ]; then
+            active_window="$agent_active_window"
+        else
+            active_window=$(tmux display-message -p '#{window_id}')
+        fi
         style_active=$(tmux_get_option_or_default @agent-indicator-style-active-window off)
         saved=$(tmux_get_env "TMUX_AGENT_WINDOW_${window_id}_ORIG_STATUS_STYLE")
         if [ -z "$bg" ] || [ -z "$fg" ]; then
@@ -123,7 +173,7 @@ render_window_state() {
         fi
     fi
     # Consumers (including menu-bar dots) read this instead of choosing their own priority.
-    tmux set-window-option -qt "$window_id" @agent-indicator-state "$state"
+    set_window_option "$window_id" @agent-indicator-state "$state"
 }
 
 sync_animation() {
@@ -179,12 +229,22 @@ tmux_get_env() {
 }
 
 tmux_set_env() {
-    tmux set-environment -g "$1" "$2"
+    if [ "$agent_batch" = true ]; then
+        [ "${agent_environment[$1]-}" != "$2" ] || return 0
+        queue_tmux set-environment -g "$1" "$2"
+    else
+        tmux set-environment -g "$1" "$2"
+    fi
     agent_environment["$1"]="$2"
 }
 
 tmux_unset_env() {
-    tmux set-environment -gu "$1" 2>/dev/null || true
+    if [ "$agent_batch" = true ]; then
+        [ "${agent_environment[$1]+set}" = set ] || return 0
+        queue_tmux set-environment -gu "$1"
+    else
+        tmux set-environment -gu "$1" 2>/dev/null || true
+    fi
     unset 'agent_environment[$1]'
 }
 
@@ -241,7 +301,11 @@ save_window_option_once() {
         return
     fi
 
-    saved=$(tmux show-options -wqv -t "$window_id" "$option" 2>/dev/null || true)
+    if [ "$agent_batch" = true ]; then
+        saved="${agent_windows[$window_id|$option]-}"
+    else
+        saved=$(tmux show-options -wqv -t "$window_id" "$option" 2>/dev/null || true)
+    fi
     if [ -z "$saved" ]; then
         tmux_set_env "$env_key" "$marker"
     else
@@ -261,9 +325,9 @@ restore_window_option() {
         return
     fi
     if [ "$saved" = "$marker" ]; then
-        tmux set-window-option -qt "$window_id" -u "$option" || true
+        set_window_option "$window_id" "$option" __UNSET__ || true
     else
-        tmux set-window-option -qt "$window_id" "$option" "$saved"
+        set_window_option "$window_id" "$option" "$saved"
     fi
     tmux_unset_env "$env_key"
 }
@@ -281,8 +345,8 @@ apply_window_title_style() {
 
     save_window_option_once "$window_id" "window-status-style" "$status_key"
     save_window_option_once "$window_id" "window-status-current-style" "$current_key"
-    tmux set-window-option -qt "$window_id" window-status-style "bg=$bg,fg=$fg"
-    tmux set-window-option -qt "$window_id" window-status-current-style "bg=$bg,fg=$fg"
+    set_window_option "$window_id" window-status-style "bg=$bg,fg=$fg"
+    set_window_option "$window_id" window-status-current-style "bg=$bg,fg=$fg"
 }
 
 clear_window_title_style() {
@@ -300,7 +364,7 @@ apply_active_border_style() {
     local border="$2"
     local orig_key="TMUX_AGENT_WINDOW_${window_id}_ORIG_ACTIVE_BORDER_STYLE"
     save_window_option_once "$window_id" "pane-active-border-style" "$orig_key"
-    tmux set-window-option -qt "$window_id" pane-active-border-style "fg=$border,bold"
+    set_window_option "$window_id" pane-active-border-style "fg=$border,bold"
 }
 
 restore_active_border_style() {
@@ -317,7 +381,11 @@ restore_active_border_style() {
 # hooks). set-option -p has no focus side effect at all.
 reset_pane_style() {
     local pane_id="$1"
-    tmux set-option -p -t "$pane_id" window-style "bg=default"
+    if [ "$agent_batch" = true ]; then
+        queue_tmux set-option -p -t "$pane_id" window-style 'bg=default'
+    else
+        tmux set-option -p -t "$pane_id" window-style 'bg=default'
+    fi
 }
 
 apply_pane_style() {
@@ -397,3 +465,5 @@ stop_animation() {
 
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notification-lib.sh"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sweep-lib.sh"

@@ -3,17 +3,28 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Full sweeps acquire one short-lived lock per window, letting hooks run between windows.
-if [ "$#" -eq 0 ]; then
-    while IFS= read -r window_id; do
-        "$0" --style-only "$window_id"
-    done < <(tmux list-windows -a -F '#{window_id}' | sort -u)
-    "$0" --notifications
-    exit 0
-fi
+# Full reconciliations batch their reads and writes in one short critical section.
+[ "$#" -ne 0 ] || set -- --all
 source "$script_dir/state-lib.sh"
+case "${1:-}:${2:-}" in
+    --all:*|--sweep:*|--agent-state-lock-held:--all|--agent-state-lock-held:--sweep) agent_batch=true ;;
+esac
 lock_agent_state "$@"
 shift
+
+if [ "$agent_batch" = true ]; then
+    [ "$1" != --sweep ] || apply_presence_snapshot
+    for window_id in "${agent_window_ids[@]}"; do
+        render_window_state "$window_id"
+    done
+    flush_sweep
+    # Notification reconciliation can publish new overlays or pane states. Read
+    # those live instead of reusing the pre-reconciliation window snapshot.
+    agent_batch=false
+    sync_animation
+    reconcile_notifications sweep
+    exit 0
+fi
 
 if [ "${1:-}" = --input-result ]; then
     shift
@@ -34,17 +45,7 @@ if [ "${1:-}" = --idle-style ]; then
     # The presence integration owns idle styling; active styling always comes from pane states.
     window_id="$2"
     value="$3"
-    for entry in 'window-status-style ORIG_STATUS_STYLE' 'window-status-current-style ORIG_STATUS_CURRENT_STYLE'; do
-        read -r option suffix <<< "$entry"
-        key="TMUX_AGENT_WINDOW_${window_id}_${suffix}"
-        if [ -n "$(tmux_get_env "$key")" ]; then
-            tmux_set_env "$key" "$value"
-        elif [ "$value" = __UNSET__ ]; then
-            tmux set-window-option -qt "$window_id" -u "$option"
-        else
-            tmux set-window-option -qt "$window_id" "$option" "$value"
-        fi
-    done
+    set_idle_style "$window_id" "$value"
     render_window_state "$window_id"
 else
     render_window_state "$1"

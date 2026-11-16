@@ -27,6 +27,7 @@ Run individual checks:
 ./tests/test-state-transitions.sh
 ./tests/test-indicator-output.sh
 ./tests/test-pane-presence.py
+./tests/test-sweep.py
 ./tests/test-focus-reset-done.sh
 ./tests/test-window-title-reset.sh
 ./tests/test-window-state-priority.sh
@@ -49,6 +50,13 @@ Run individual checks:
 ./tests/test-ssh-mouse.py
 ./tests/test-agent-recovery.py
 ```
+
+The sweep tests count process and tmux launches with one and eight windows. They check one process
+scan, bounded client launches, literal labels, restoration of idle styles, concurrent sweep coalescing,
+independent servers, explicit refreshes waiting for a fresh scan, contention lasting beyond the
+hook-detachment threshold, process replacement,
+and navigation while the state writer is locked. Stale focus events must not acknowledge another
+window, and a process scan must not overwrite newer agent state.
 
 The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
 process inside the test pane. They verify early and late answers, stale status, parallel tools,
@@ -113,7 +121,9 @@ It also checks that detached Codex hooks are ignored despite a valid, stale `TMU
 The passthrough test checks keyboard-setting restoration, unchanged agent colours across window
 changes, plain SSH exit, reconnect retries and exit-triggered sweeps, and stale or closed owner panes.
 The mouse test sends terminal mouse events through two isolated, nested tmux servers. It checks
-local and remote status-bar clicks, split-pane clicks, manual toggles and stale selections.
+local and remote status-bar clicks, split-pane clicks, manual toggles and stale selections. A local
+click followed by a keyboard event must respond while the state writer is locked, so selecting
+text cannot queue behind an unnecessary SSH routing helper.
 For a visual check, enable the README's F12 bindings in an isolated test session: the bar should turn
 orange while agent titles keep their colours, then return to its original style when passthrough ends.
 
@@ -322,7 +332,10 @@ stay waiting, and a new hook in the replacement pane must be accepted under its 
 
 ## Menu-bar colors
 
-`test-hammerspoon-dots.py` uses Lua with a mock Hammerspoon API and an isolated tmux server. It checks
+`test-hammerspoon-dots.py` uses Lua with a mock Hammerspoon API and an isolated tmux server. It rejects
+synchronous shell calls and checks that cached menus still open while a local query is pending,
+with no accumulated polls. Timeout, late-callback, and recovery cases protect the cached snapshot.
+It also checks
 named/indexed/RGB colors, actual current/inactive/inherited styles, remote probe output, palette-only
 redraws, and menu colors. SSH-only segments must keep excluding container agents, and changing a
 palette must not play state-change sounds. Install Lua to run this optional integration test; CI

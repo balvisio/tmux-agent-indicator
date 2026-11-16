@@ -56,6 +56,13 @@ run_state() {
     local state="$1"
     local agent="${2:-claude}"
     tmux_cmd run-shell "TMUX_PANE=$PANE \"$REPO_ROOT/scripts/agent-state.sh\" --agent $agent --state $state"
+    wait_for_state_writers
+}
+
+wait_for_state_writers() {
+    # A contended hook can return with its FIFO retry still pending. Join the
+    # queue behind it before synchronous tests inspect the resulting state.
+    tmux_cmd run-shell "python3 \"$REPO_ROOT/scripts/state-lock.py\" --wait /dev/null"
 }
 
 get_env() {

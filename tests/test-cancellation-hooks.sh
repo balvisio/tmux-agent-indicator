@@ -29,6 +29,7 @@ run_in_pane() {
     done
     result=$(cat "$completion")
     [ "$result" = 0 ] || fail "hook did not complete successfully: $result"
+    wait_for_state_writers
 }
 
 # Keep another agent waiting so cleanup must not touch its state or window.

@@ -16,8 +16,8 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def wait_for(check):
-    deadline = time.monotonic() + 10
+def wait_for(check, timeout=10):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if check():
             return
@@ -104,6 +104,19 @@ def main():
             client = subprocess.Popen(["tmux", "-S", str(outer), "attach", "-t", "local"],
                                       env=env, stdin=slave, stdout=slave, stderr=slave)
             wait_for(lambda: str(client.pid) in t("list-clients", "-F", "#{client_pid}"))
+
+            # A local click must not run an SSH helper behind the state lock:
+            # that blocks this client's subsequent drag/keyboard events too.
+            server_pid = t("display", "-p", "#{pid}")
+            lock_path = Path(f"{outer}.agent-indicator-{server_pid}.lock")
+            t("bind", "-T", "root", "F11", "set", "-g", "@mouse-responsive", "yes")
+            with lock_path.open("a+") as lock:
+                fcntl.lockf(lock, fcntl.LOCK_EX)
+                click(3, 3)
+                os.write(master, b"\033[23~")
+                wait_for(lambda: t("show", "-gqv", "@mouse-responsive") == "yes", timeout=1.5)
+            assert routed("")
+            print("PASS: local mouse clicks keep the client responsive while the state writer is locked", flush=True)
 
             # Click the SSH entry in the shipped right-hand window list, then return locally.
             click(116, 24)

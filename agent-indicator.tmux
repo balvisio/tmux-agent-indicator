@@ -41,7 +41,7 @@ register_hook_once() {
 
 register_focus_hooks() {
     local hook_script="$CURRENT_DIR/scripts/pane-focus-in.sh"
-    local hook_command="run-shell \"$hook_script \\\"#{pane_id}\\\" \\\"#{window_id}\\\"\""
+    local hook_command="run-shell -b \"$hook_script \\\"#{pane_id}\\\" \\\"#{window_id}\\\"\""
     register_hook_once "pane-focus-in" "$hook_command"
     register_hook_once "after-select-window" "$hook_command"
     register_hook_once "after-select-pane" "$hook_command"

@@ -36,6 +36,11 @@ second_style_before="$(tmux_cmd show-options -pv -p -t "$second_done_pane" windo
 [ "$second_style_before" = "bg=colour22" ] || fail "second done pane style should be applied: $second_style_before"
 
 tmux_cmd select-pane -t "$first_done_pane"
+# Focus acknowledgement runs asynchronously so navigation never waits for writers.
+for _ in $(seq 1 100); do
+    [ "$(tmux_cmd show-options -pv -p -t "$second_done_pane" window-style)" = bg=default ] && break
+    sleep 0.05
+done
 second_style_unfocused="$(tmux_cmd show-options -pv -p -t "$second_done_pane" window-style)"
 [ "$second_style_unfocused" = "bg=default" ] || fail "window focus should acknowledge every completed pane: $second_style_unfocused"
 

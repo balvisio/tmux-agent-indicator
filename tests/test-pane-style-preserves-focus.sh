@@ -16,7 +16,18 @@ tmux_cmd resize-pane -Z -t "$PANE"
 active_before="$(tmux_cmd display-message -p -t "$WIN" '#{pane_id}')"
 zoom_before="$(tmux_cmd display-message -p -t "$WIN" '#{window_zoomed_flag}')"
 
+wait_for_style() {
+    # Layout hooks can hold the writer lock long enough for the state command
+    # to hand its update to a detached retry. Check the completed update.
+    for _ in $(seq 1 100); do
+        [ "$(tmux_cmd show-options -pqv -t "$target_pane" window-style)" = "$1" ] && return 0
+        sleep 0.05
+    done
+    fail "target pane style never became $1"
+}
+
 tmux_cmd run-shell "TMUX_PANE=$target_pane \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state done"
+wait_for_style bg=colour52
 
 active_after="$(tmux_cmd display-message -p -t "$WIN" '#{pane_id}')"
 zoom_after="$(tmux_cmd display-message -p -t "$WIN" '#{window_zoomed_flag}')"
@@ -27,6 +38,7 @@ target_style="$(tmux_cmd show-options -p -v -t "$target_pane" window-style)"
 [ "$target_style" = "bg=colour52" ] || fail "target pane style was not applied: $target_style"
 
 tmux_cmd run-shell "TMUX_PANE=$target_pane \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state off"
+wait_for_style bg=default
 
 active_after="$(tmux_cmd display-message -p -t "$WIN" '#{pane_id}')"
 zoom_after="$(tmux_cmd display-message -p -t "$WIN" '#{window_zoomed_flag}')"

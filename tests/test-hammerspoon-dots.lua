@@ -37,7 +37,57 @@ styled.__index = {find = function(self, ...) return self.text:find(...) end}
 local hotkeyFn = nil
 local expansionFn = nil
 local activeHotkeys = {}
+local function quote(value)
+    if value:match('^[%w_./:@=+-]+$') then return value end
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+local function executeFixture(command, input)
+        if command:find('select-window',1,true) then
+            selectedWindow = command
+            return '', true
+        elseif input then
+            sshWrites = sshWrites + 1
+            sshCommand = input
+            assert(not command:find('window-status',1,true), 'remote colors must not overwrite local agent styles')
+            for id, option, value in input:gmatch('set%-option %-wq %-t (@%d+) (@ssh_agent_%w+) "([^"]*)"') do
+                sshOptions[id] = sshOptions[id] or {}
+                sshOptions[id][option] = value
+            end
+            return '', true
+        elseif command:find('/bin/ps',1,true) then
+            return vscode and '10 1 Code remote-ssh\n11 10 /usr/bin/ssh colossus\n' or '', true
+        elseif command:find('@agent-indicator-state',1,true) then
+            localCommand = command
+            local rows = {}
+            local hosts = {}
+            for row in sshOutput:gmatch('[^\n]+') do
+                local id, index, host = row:match('^([^\t]+)\t([^\t]+)\t([^\t]*)')
+                hosts[id] = {index = index, host = host}
+            end
+            for row in localOutput:gmatch('[^\n]+') do
+                local id = row:match('^([^\t]+)')
+                local options = sshOptions[id] or {}
+                rows[#rows + 1] = row .. '\t' .. (hosts[id] and hosts[id].host or '')
+                    .. '\t' .. (options['@ssh_agent_host'] or '') .. '\t' .. (options['@ssh_agent_color'] or '')
+                hosts[id] = nil
+            end
+            for id, link in pairs(hosts) do
+                local options = sshOptions[id] or {}
+                rows[#rows + 1] = table.concat({id, link.index, '', '', '', '', '', link.host}, '\t')
+                    .. '\t' .. (options['@ssh_agent_host'] or '')
+                    .. '\t' .. (options['@ssh_agent_color'] or '')
+            end
+            return table.concat(rows, '\n'), true
+        elseif command:find('AGENT_STATE=',1,true) then
+            sounds = sounds + 1
+            return '', true
+        end
+        error('Unexpected command: '..command)
+    end
+local delayedLocal = false
+local localTasks = {}
 hs = {
+    fs = {mkdir = function(path) os.execute('mkdir -p ' .. quote(path)) end},
     hotkey = {
         new = function(mods, key, fn)
             return {idx = table.concat(mods, '+') .. ':' .. key,
@@ -52,39 +102,7 @@ hs = {
         getHotkeys = function() return activeHotkeys end,
         systemAssigned = function(mods, key) return key == 'F11' and {enabled = true} or nil end,
     },
-    execute = function(command)
-        if command:find('select-window',1,true) then
-            selectedWindow = command
-            return '', true
-        elseif command:find('set-option -wq',1,true) then
-            sshWrites = sshWrites + 1
-            sshCommand = command
-            assert(not command:find('window-status',1,true), 'remote colors must not overwrite local agent styles')
-            for id, option, value in command:gmatch("set%-option %-wq %-t (@%d+) (@ssh_agent_%w+) '([^']*)'") do
-                sshOptions[id] = sshOptions[id] or {}
-                sshOptions[id][option] = value
-            end
-            return '', true
-        elseif command:find('/bin/ps',1,true) then
-            return vscode and '10 1 Code remote-ssh\n11 10 /usr/bin/ssh colossus\n' or '', true
-        elseif command:find('@ssh_host',1,true) then
-            local rows = {}
-            for row in sshOutput:gmatch('[^\n]+') do
-                local id = row:match('^([^\t]+)')
-                local options = sshOptions[id] or {}
-                rows[#rows + 1] = row .. '\t' .. (options['@ssh_agent_host'] or '')
-                    .. '\t' .. (options['@ssh_agent_color'] or '')
-            end
-            return table.concat(rows, '\n'), true
-        elseif command:find('@agent-indicator-state',1,true) then
-            localCommand = command
-            return localOutput, true
-        elseif command:find('AGENT_STATE=',1,true) then
-            sounds = sounds + 1
-            return '', true
-        end
-        error('Unexpected command: '..command)
-    end,
+    execute = function() error('synchronous shell call on the UI thread') end,
     base64 = {encode = function(text)
         if text:find('# agent-dots remote probe:', 1, true) then
             remoteScript = text
@@ -143,6 +161,39 @@ hs = {
     } end},
     timer = {doEvery = function() return {} end},
     task = {new = function(executable, callback, args)
+        if not executable:match('/scripts/vpn%-guard%.py$') then
+            assert(executable == '/bin/sh' and args[3] == 'agent-dots', 'task output must not fill a pipe before exit')
+            local outputFile, errorFile = args[4], args[5]
+            local wrapper = assert(io.open(arg[2] .. '/task-wrapper.sh', 'w'))
+            wrapper:write(args[2]):close()
+            local command = args[6]
+            for index = 7, #args do command = command .. ' ' .. quote(args[index]) end
+            local task = {callback = callback, command = command,
+                setInput = function(self, input) self.input = input; return self end,
+                finish = function(self, code, out)
+                    self.running = false
+                    if not code then
+                        local ok
+                        out, ok = executeFixture(command, self.input)
+                        code = ok and 0 or 1
+                    end
+                    local file = assert(io.open(outputFile, 'wb'))
+                    file:write(out or ''):close()
+                    file = assert(io.open(errorFile, 'wb'))
+                    file:close()
+                    callback(code, '', '')
+                    assert(not io.open(outputFile, 'rb') and not io.open(errorFile, 'rb'), 'completed output must be removed')
+                end,
+                start = function(self)
+                    self.running = true
+                    if not delayedLocal then self:finish() end
+                    return self
+                end,
+                isRunning = function(self) return self.running end,
+                terminate = function(self) self.running = false; self.terminated = true end}
+            localTasks[#localTasks + 1] = task
+            return task
+        end
         assert(executable:match('/scripts/vpn%-guard%.py$'), 'remote tasks must use the VPN guard')
         assert(args[1] == '--probe' and args[2] == 'colossus', 'probes must check their destination without waiting')
         local options = {}
@@ -165,6 +216,9 @@ hs = {
 hs.screen.mainScreen = function() return hs.screen.allScreens()[1] end
 AGENT_DOTS = { hotkey = { mods = {'cmd'}, key = 'F9' } } -- init.lua-style override
 local dots = dofile(arg[1])
+-- Host-discovery fixtures also advance the local timer, which supplies SSH links.
+local pollHosts = dots.pollAll
+dots.pollAll = function() dots.refresh(); pollHosts() end
 assert(remoteScript:find('#{E:window-status-current-style}',1,true), 'remote poll must read actual title styles')
 assert(not remoteScript:find('__WINDOW_STYLE__',1,true), 'remote probe style placeholder was not expanded')
 local fixtures = {
@@ -596,7 +650,9 @@ assert(sshOptions['@6']['@ssh_agent_host'] == 'other-host' and sshOptions['@6'][
 assert(sshOptions['@7']['@ssh_agent_host'] == '' and sshOptions['@7']['@ssh_agent_color'] == '',
     'disconnect must clear published colors')
 sshOutput = '@6\t5\tcolossus\n'
+dots.pollAll()
 poll('needs-input', 'needs-input', 'bg=magenta', 'bg=magenta')
+assert(sshOptions['@6']['@ssh_agent_color'] == 'magenta')
 local colorCommand = assert(io.open(arg[2] .. '/ssh-color-command.txt', 'w'))
 colorCommand:write(sshCommand)
 colorCommand:close()
@@ -750,3 +806,59 @@ assert(integrated.menu()[3].title == 'Slack badge: fixture failure', 'badge fail
 assert(integrated.menu()[1].fn and integrated.menu()[2].fn, 'badge failure must leave mode controls usable')
 dofile = originalDofile
 print('PASS: optional Slack badge synchronization follows menu and external mode changes')
+
+-- A slow or hung tmux must not run queries from menu handling or accumulate
+-- background work. The native UI can keep processing events until completion.
+AGENT_DOTS = {hotkey = false, expansionHotkey = false}
+vscode, sshOutput = false, ''
+localOutput = '@1\t1\t1\tagent\t1\trunning\tbg=yellow\n'
+local responsive = dofile(arg[1])
+local cached = responsive.agentWindows()
+delayedLocal = true
+responsive.refresh()
+local pending = localTasks[#localTasks]
+assert(pending.running)
+local count = #localTasks
+local beforePopups = popupCount
+mousePoint = {x = 100, y = 12}
+for _ = 1, 5 do
+    responsive.refresh()
+    responsive.menu()
+    responsive.menubar.click()
+end
+assert(#localTasks == count, 'a stalled poll must not queue more local reads')
+assert(responsive.agentWindows() == cached and popupCount == beforePopups + 5,
+    'menus must open using the latest complete snapshot while tmux is stalled')
+pending.running = false
+responsive.refresh()
+assert(#localTasks == count, 'process exit still needs its completion callback')
+
+local originalTime = os.time
+local later = originalTime() + 11
+os.time = function() return later end
+responsive.refresh()
+local replacement = localTasks[#localTasks]
+assert(replacement ~= pending and not responsive.agentWindows(), 'expired queries must retry and invalidate stale availability')
+pending:finish(0, '@1\t1\t1\told\t1\tdone\tbg=red\t\t\t\n')
+assert(not responsive.agentWindows(), 'late completion must not replace a newer snapshot')
+replacement:finish(0, '@1\t1\t1\tnew\t1\tneeds-input\tbg=magenta\t\t\t\n')
+assert(responsive.agentWindows()[1].label == 'new' and responsive.agentWindows()[1].color == '#D946EF')
+os.time = originalTime
+responsive.refresh()
+pending = localTasks[#localTasks]
+os.time = function() return later end
+responsive.refresh()
+assert(pending.terminated, 'a still-running expired query must be terminated')
+localTasks[#localTasks]:finish(1, '')
+assert(responsive.menu()[4].title == 'tmux is not running', 'unavailable tmux must keep mode controls and report status')
+os.time, delayedLocal = originalTime, false
+responsive.refresh()
+assert(responsive.agentWindows()[1].state == 'running', 'a later successful poll must recover')
+print('PASS: cached menus stay responsive through slow queries, pending callbacks, timeouts, late results, and recovery')
+delayedLocal = true
+responsive.refresh()
+pending = localTasks[#localTasks]
+hs.shutdownCallback()
+assert(pending.terminated, 'reload must stop unfinished checks and remove their output')
+pending:finish(0, '')
+print('PASS: reloading cancels pending work and cleans private task output')

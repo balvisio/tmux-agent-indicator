@@ -21,6 +21,7 @@ tmux_cmd set-window-option -t "$WIN" pane-active-border-style fg=white
 
 set_state() {
     tmux_cmd run-shell "TMUX_PANE=$1 \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state $2"
+    wait_for_state_writers
 }
 assert_window() {
     local expected="$1" bg border actual
@@ -72,6 +73,7 @@ for active_state in needs-input running; do
     tmux_cmd select-window -t "$WIN"
     tmux_cmd select-pane -t "$PANE"
     tmux_cmd run-shell "\"$ROOT_DIR/scripts/pane-focus-in.sh\" \"$PANE\" \"$WIN\""
+    wait_for_state_writers
     [ "$(get_env "TMUX_AGENT_PANE_${PANE}_STATE")" = "$active_state" ] || fail "focus erased $active_state"
     assert_empty "$(get_env "TMUX_AGENT_PANE_${second}_STATE")" "focus must acknowledge completed sibling"
     assert_window "$active_state"
@@ -80,6 +82,7 @@ done
 tmux_cmd select-window -t "$OTHER_WIN"
 set_state "$second" done
 tmux_cmd run-shell "\"$ROOT_DIR/scripts/pane-focus-in.sh\" \"$PANE\" \"$WIN\""
+wait_for_state_writers
 [ "$(get_env "TMUX_AGENT_PANE_${second}_STATE")" = done ] || fail "stale focus event acknowledged completion"
 pass "focus acknowledges done siblings and preserves waiting/running agents"
 
@@ -99,6 +102,7 @@ assert_window idle
 # Simultaneous hooks and a presence sweep must not allow done/blue to hide needs-input.
 for _ in 1 2 3; do
     tmux_cmd run-shell "TMUX_PANE=$PANE \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state needs-input & TMUX_PANE=$second \"$ROOT_DIR/scripts/agent-state.sh\" --agent claude --state done & \"$ROOT_DIR/scripts/window-state.sh\" --idle-style $WIN bg=blue,fg=white & wait"
+    wait_for_state_writers
     assert_window needs-input
 done
 # Reconciliation repairs a stale title without changing the stored waiting state.

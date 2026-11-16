@@ -158,8 +158,14 @@ esac
             for contender in contenders:
                 _, errors = contender.communicate(timeout=5)
                 assert contender.returncode == 0, errors
-            lines = log.read_text().splitlines()
-            assert len(lines) == 12
+            # A contended writer may return after handing its ticket to a
+            # detached child. Wait for those writes, not just the launcher exits.
+            for _ in range(200):
+                lines = log.read_text().splitlines() if log.exists() else []
+                if len(lines) == 12:
+                    break
+                time.sleep(0.05)
+            assert len(lines) == 12, lines
             for index in range(0, len(lines), 2):
                 assert lines[index].startswith("begin ")
                 assert lines[index + 1] == lines[index].replace("begin ", "end ", 1), lines

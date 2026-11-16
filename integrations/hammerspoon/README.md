@@ -53,6 +53,14 @@ come from the window's actual title style, including the active-window style, in
 and last-window/bell/activity overrides. Local and remote polls use the same format. Changing a color
 without changing state redraws the dots on the next poll (2 seconds locally, 3 seconds remotely).
 
+Menus open from the latest completed snapshot. Local tmux queries, VS Code discovery, colour updates,
+window selection, and sounds run asynchronously, so a slow command cannot block menu highlighting.
+Local windows and SSH links share one tmux query. A pending check is not queued again; after ten
+seconds a stalled local check is cancelled and retried. Completed output is read from private
+temporary files, removed after each check or reload, so large process listings cannot fill a pipe
+and stall discovery. Other Hammerspoon modules share the same
+UI thread, so synchronous commands in those modules can still delay the menu.
+
 Supported colors include tmux names, `colour0`–`colour255` (`colorN` also works), and `#RRGGBB`.
 RGB and extended indexed colors have portable values; named/ANSI colors use stable menu-bar
 counterparts because terminal themes can redefine those colors. When the background has no explicit
