@@ -2,7 +2,9 @@
 # Reconcile window colors after pane layout changes or a presence sweep.
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+script_dir="$(cd "$script_dir" && pwd)"
 # Full reconciliations batch their reads and writes in one short critical section.
 [ "$#" -ne 0 ] || set -- --all
 source "$script_dir/state-lib.sh"
@@ -11,6 +13,26 @@ case "${1:-}:${2:-}" in
 esac
 lock_agent_state "$@"
 shift
+
+if [ "${1:-}" = --layout ]; then
+    window_id="$2"
+    layout_request="${3:-}"
+    cleanup_layout_request() {
+        local status="$1" command
+        [ "$BASHPID" = "$$" ] || return 0
+        if [[ "$layout_request" =~ ^[0-9]+$ ]]; then
+            command="set-option -wqu -t $window_id @agent-indicator-layout-request"
+            if [ "$status" -eq 0 ]; then
+                command+=" ; run-shell -C -t $window_id '#{@agent-indicator-layout-launch}'"
+            fi
+            tmux if-shell -F -t "$window_id" "#{==:#{@agent-indicator-layout-request},$layout_request}" \
+                "$command" 2>/dev/null || true
+        fi
+        cleanup_state_markers
+    }
+    trap 'cleanup_layout_request "$?"' EXIT
+    set -- "$window_id"
+fi
 
 if [ "$agent_batch" = true ]; then
     [ "$1" != --sweep ] || apply_presence_snapshot

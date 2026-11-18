@@ -15,6 +15,9 @@ import sys
 import time
 import uuid
 
+sys.dont_write_bytecode = True
+import runtime
+
 
 LOCK_FD = 9
 WAIT_SECONDS = 2.0
@@ -38,11 +41,16 @@ def main():
     if foreground:
         del sys.argv[1]
 
-    server = subprocess.check_output(
-        ["tmux", "display-message", "-p", "#{socket_path}|#{pid}"],
-        text=True, timeout=1,
-    ).strip()
-    socket, pid = server.rsplit("|", 1)
+    # Detached question readers inherit the hook's environment, but their
+    # later reconciliation is a new writer. They must never reuse the original
+    # hook's arrival marker or retire its running ticket.
+    hook_event = Path(sys.argv[1]).name == 'agent-state.sh'
+    os.environ.pop('TMUX_AGENT_WRITER_MARKER', None)
+    if not hook_event:
+        os.environ.pop('TMUX_AGENT_ARRIVAL', None)
+
+    server = runtime.identity()
+    socket, pid = server['socket'], server['pid']
     # Use the socket directory so all clients agree, regardless of HOME/TMPDIR.
     # Never unlink a lock file: existing waiters must keep using the same inode.
     path = f"{socket}.{scope}-{pid}.lock"
@@ -56,19 +64,27 @@ def main():
     # to its agent; conditional updates must not overtake the event they follow.
     queue = Path(path + ".queue")
     queue.mkdir(mode=0o700, exist_ok=True)
-    ticket = queue / f"{time.monotonic_ns():020d}-{uuid.uuid4().hex}"
+    arrival = Path(os.environ['TMUX_AGENT_ARRIVAL']) if os.environ.get('TMUX_AGENT_ARRIVAL') else None
+    stamp = arrival.stat().st_mtime_ns if arrival else time.time_ns()
+    ticket = queue / f"{stamp:020d}-{uuid.uuid4().hex}"
     initial = ticket.with_suffix(".tmp")
-    initial.write_text(str(os.getpid()))
+    event_pane = os.environ.get('TMUX_AGENT_EVENT_PANE') if hook_event else None
+    initial.write_text(runtime.marker_text(os.getpid(), pid, event_pane))
     os.replace(initial, ticket)
     deadline = time.monotonic() + WAIT_SECONDS
     detached = False
     try:
         while True:
+            # Hook arrival precedes Python startup and payload parsing. A later
+            # conditional event must not overtake an earlier permission request
+            # that has not reached the lock queue yet.
+            earlier = arrival and any(runtime.arrivals(before=stamp, exclude=arrival, server_pid=pid))
             for candidate in sorted(p for p in queue.iterdir() if not p.name.endswith(".tmp")):
                 try:
                     owner = candidate.read_text()
-                    os.kill(int(owner), 0)
-                except ProcessLookupError:
+                    if not runtime.marker_alive(candidate):
+                        raise ProcessLookupError
+                except (ProcessLookupError, ValueError):
                     try:
                         if candidate.read_text() == owner:
                             candidate.unlink(missing_ok=True)
@@ -77,20 +93,28 @@ def main():
                     continue
                 except FileNotFoundError:
                     continue
-                if candidate == ticket:
+                if candidate.name.endswith('.run'):
+                    continue
+                if candidate == ticket and not earlier:
                     try:
                         fcntl.lockf(LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except OSError as error:
                         if error.errno not in (errno.EACCES, errno.EAGAIN):
                             raise
                     else:
-                        current = subprocess.check_output(
-                            ["tmux", "display-message", "-p", "#{socket_path}|#{pid}"],
-                            text=True, timeout=1,
-                        ).strip()
-                        if current != server:
+                        if not runtime.server_alive(server):
                             return 0
-                        ticket.unlink()
+                        if sys.argv[1] == '--barrier':
+                            return 0
+                        if scope == 'agent-indicator':
+                            running = ticket.with_suffix('.run')
+                            ticket.replace(running)
+                            ticket = running
+                            os.environ['TMUX_AGENT_WRITER_MARKER'] = str(running)
+                        else:
+                            # SSH routing is independent of conditional agent
+                            # hooks and does not source the state-library trap.
+                            ticket.unlink(missing_ok=True)
                         os.execvp("bash", ["bash", sys.argv[1], "--agent-state-lock-held", *sys.argv[2:]])
                 break
 
@@ -114,18 +138,16 @@ def main():
                         for stream in (0, 1, 2):
                             os.dup2(null.fileno(), stream)
                     replacement = ticket.with_suffix(".tmp")
-                    replacement.write_text(str(os.getpid()))
+                    replacement.write_text(runtime.marker_text(os.getpid(), pid, event_pane))
                     os.replace(replacement, ticket)
+                    if os.environ.get('TMUX_AGENT_ARRIVAL'):
+                        runtime.update_marker(arrival, os.getpid(), pid, event_pane)
                     os.write(ready_write, b"1")
                     os.close(ready_write)
                     detached = True
                 # A stopped server cannot consume this update. Do not leave retries
                 # behind, or let an old event reach a new server on the same socket.
-                current = subprocess.check_output(
-                    ["tmux", "display-message", "-p", "#{socket_path}|#{pid}"],
-                    text=True, timeout=1,
-                ).strip()
-                if current != server:
+                if not runtime.server_alive(server):
                     return 0
                 deadline = time.monotonic() + WAIT_SECONDS
             time.sleep(0.05)

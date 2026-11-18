@@ -83,8 +83,28 @@ set_idle_style() {
     done
 }
 
+set_agent_window_name() {
+    local window="$1" name="$2" refresh
+    [ "${agent_windows[$window|@agent_name]-}" != "$name" ] || return 0
+    agent_windows["$window|@agent_name"]="$name"
+    if [ -n "$name" ]; then
+        queue_tmux set-window-option -qt "$window" @agent_name "$name"
+    else
+        queue_tmux set-window-option -qut "$window" @agent_name
+    fi
+    # An option change alone does not wake tmux's name timer in a quiet pane.
+    # Re-arm it only if automatic naming is still on at the moment of the write.
+    # Manual rename-window disables it; never undo that choice from a sweep.
+    refresh="set-window-option -qt $window automatic-rename on"
+    if [ -z "${agent_windows[$window|automatic-rename]-}" ]; then
+        # A refresh must not turn an inherited setting into a permanent override.
+        refresh+=" ; set-window-option -qut $window automatic-rename"
+    fi
+    queue_tmux if-shell -F -t "$window" '#{automatic-rename}' "$refresh"
+}
+
 apply_presence_snapshot() {
-    local kind id identity label host
+    local kind id identity label host icons
     while IFS= read -r -d '' kind && IFS= read -r -d '' id &&
           IFS= read -r -d '' identity && IFS= read -r -d '' label && IFS= read -r -d '' host; do
         if [ "$kind" = stale ]; then
@@ -101,12 +121,22 @@ apply_presence_snapshot() {
         # Hooks still reconcile its current state; the next scan refreshes labels.
         [ "${agent_windows[$id|signature]-}" = "$identity" ] || continue
         if [ -n "$label" ]; then
+            icons="${label%% *}"
             set_idle_style "$id" 'bg=blue,fg=white'
             set_window_option "$id" @agent_present 1
-            set_window_option "$id" @agent_label "$label"
+            set_window_option "$id" @agent_icons "$icons"
+            set_agent_window_name "$id" "${label#* }"
+            # Menu-bar consumers retain their display-label field, derived from
+            # the actual window name. The native window-renamed hook keeps it
+            # current when the name timer fires or the user renames the window.
+            if [ "${agent_windows[$id|@agent_label]-}" != "$icons ${agent_windows[$id|window_name]-}" ]; then
+                queue_tmux set-window-option -qFt "$id" @agent_label '#{@agent_icons} #{window_name}'
+            fi
         elif [ "${agent_windows[$id|@agent_present]-}" = 1 ]; then
             set_idle_style "$id" __UNSET__
             set_window_option "$id" @agent_present __UNSET__
+            set_window_option "$id" @agent_icons __UNSET__
+            set_agent_window_name "$id" ""
             set_window_option "$id" @agent_label __UNSET__
         fi
         if [ -n "$host" ]; then

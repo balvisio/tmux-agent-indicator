@@ -62,7 +62,7 @@ run_state() {
 wait_for_state_writers() {
     # A contended hook can return with its FIFO retry still pending. Join the
     # queue behind it before synchronous tests inspect the resulting state.
-    tmux_cmd run-shell "python3 \"$REPO_ROOT/scripts/state-lock.py\" --wait /dev/null"
+    tmux_cmd run-shell "python3 \"$REPO_ROOT/scripts/state-lock.py\" --wait --barrier"
 }
 
 get_env() {

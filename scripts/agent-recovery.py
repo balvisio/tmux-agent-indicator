@@ -12,13 +12,20 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import runtime
+import scheduled
+import navigation
 
 SCRIPT = Path(__file__).resolve()
 PLUGINS = SCRIPT.parent.parent.parent
 RESURRECT = PLUGINS / "tmux-resurrect"
 CONTINUUM = PLUGINS / "tmux-continuum"
 OPTION = "@agent_recovery"
-ERRORS = (OSError, ValueError, KeyError, subprocess.SubprocessError)
+ERRORS = (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError)
 STATUS = ("#{?@agent_recovery_warning,#[fg=black#,bg=yellow] "
           "#{@agent_recovery_warning} #[default],}")
 
@@ -151,12 +158,44 @@ def panes():
     return [line.split("\t", 8) for line in output.splitlines()]
 
 
-def request_save():
-    tmux("run-shell", "-b", shlex.join([str(SCRIPT), "save", "--background"]))
+def save_request_command(delay=2):
+    worker = shlex.join([str(SCRIPT), 'save', '--background', '--requested']) + " '#{@agent_recovery_pending}'"
+    # The delayed run-shell captures the token when it is scheduled. A stale
+    # worker cannot clear a newer request after disable/reload or expiry.
+    return ("if-shell -F '#{&&:#{==:#{@agent-indicator-recovery},on},#{||:#{==:#{@agent_recovery_pending},},#{e|>=:#{T:@agent-indicator-now},#{e|+:#{@agent_recovery_requested_at},180}}}}' { "
+            "set-option -gF @agent_recovery_serial '#{e|+:#{?@agent_recovery_serial,#{@agent_recovery_serial},0},1}' ; "
+            "set-option -gF @agent_recovery_pending '#{@agent_recovery_generation}-#{@agent_recovery_serial}' ; "
+            "set-option -gF @agent_recovery_requested_at '#{T:@agent-indicator-now}' ; "
+            "run-shell -b -d " + str(delay) + " " + shlex.quote(worker) + ' }')
+
+
+def request_save(delay=2):
+    # Source native commands directly. run-shell -C would expand every format
+    # before the serial increment and capture the previous request's token.
+    tmux('source-file', '-', input=save_request_command(delay) + '\n')
+
+
+def take_request(token):
+    if not scheduled.valid(token):
+        return False
+    return tmux('if-shell', '-F', '#{==:#{@agent_recovery_pending},' + token + '}',
+                'set-option -gqu @agent_recovery_pending ; display-message -p claimed') == 'claimed'
 
 
 def record(agent, args):
-    if not enabled():
+    parents = runtime.ancestors(os.getpid())
+    server = runtime.hook_server(parents)
+    if server:
+        os.environ['TMUX'] = f"{server['socket']},{server['pid']},0"
+    elif not os.environ.get('TMUX'):
+        return
+    # A single read supplies both the feature setting and every saved identity.
+    raw = tmux('list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@agent-indicator-recovery}\t#{' + OPTION + '}')
+    records = [line.split('\t', 4) for line in raw.splitlines()]
+    recovery_enabled = (bool(records) and records[0][3] == 'on'
+                        and (RESURRECT / 'resurrect.tmux').is_file()
+                        and (CONTINUUM / 'continuum.tmux').is_file())
+    if not recovery_enabled and agent == "ssh":
         return
     if agent == "ssh":
         payload = {"kind": "ssh", "args": args, "cwd": os.getcwd()}
@@ -169,13 +208,28 @@ def record(agent, args):
         if agent == "codex" and event.get("transcript_path", "") is None:
             return  # Transient helper threads share the TUI process but cannot be resumed.
         if event.get("hook_event_name") == "SessionEnd":
-            request_save()
+            if recovery_enabled:
+                request_save()
             return
         session = event.get("session_id")
         cwd = event.get("cwd")
         if not isinstance(session, str) or not session or not isinstance(cwd, str):
             return
         payload = {"kind": agent, "session": session, "cwd": cwd}
+        parents = runtime.ancestors(os.getppid())
+        expected_env = {key: os.environ[key] for key in
+                        ('CODEX_HOME', 'CODEX_CONFIG_DIR', 'CLAUDE_CONFIG_DIR') if key in os.environ}
+        for _pane, root, dead, _enabled, raw in records:
+            try:
+                old = json.loads(raw)
+                owner = parents.get(old['pid'])
+                if (dead == '0' and int(root) in parents and owner
+                        and runtime.same_start(old['started'], owner['started'])
+                        and all(old.get(k) == v for k, v in payload.items())
+                        and old.get('env', {}) == expected_env):
+                    return
+            except (ValueError, KeyError, TypeError):
+                continue
         procs = processes()
         owner = None
         for pid in ancestry(os.getppid(), procs):
@@ -191,13 +245,26 @@ def record(agent, args):
         if owner is None:
             return
     parents = set(ancestry(owner, procs))
-    pane = next((row[3] for row in panes() if int(row[4]) in parents and row[5] == "0"), None)
+    pane = next((row[0] for row in records if int(row[1]) in parents and row[2] == "0"), None)
     if pane is None:
         return
-    payload.update(pid=owner, started=procs[owner][1])
+    birth = runtime.process(owner)
+    payload.update(pid=owner, started=birth['started'] if birth and runtime.same_start(procs[owner][1], birth['started'])
+                   else runtime.start_number(procs[owner][1]))
     payload["env"] = {key: os.environ[key] for key in
                       ("CODEX_HOME", "CODEX_CONFIG_DIR", "CLAUDE_CONFIG_DIR") if key in os.environ}
     tmux("set-option", "-pq", "-t", pane, OPTION, json.dumps(payload, separators=(",", ":")))
+    if recovery_enabled:
+        request_save()
+
+
+def finish_ssh(pane, owner):
+    if not owner.isdigit() or not pane.startswith('%') or not pane[1:].isdigit():
+        return
+    # Both the marker and recovery record must still belong to this launcher.
+    gate = '#{&&:#{==:#{@ssh_reconnect_pid},' + owner + '},#{m/r:"pid": *' + owner + '[^0-9],#{' + OPTION + '}}}'
+    tmux('if-shell', '-F', '-t', pane, gate,
+         f'set-option -pqu -t {pane} {OPTION}')
     request_save()
 
 
@@ -205,7 +272,7 @@ def resume_data(row, procs):
     try:
         data = json.loads(row[6])
         owner = data["pid"]
-        if row[5] != "0" or procs[owner][1] != data["started"]:
+        if row[5] != "0" or not runtime.same_start(procs[owner][1], data["started"]):
             return None
         if int(row[4]) not in set(ancestry(owner, procs)):
             return None
@@ -299,6 +366,59 @@ def run_resurrect(action, stage, keep_existing=False):
                             pass
         except subprocess.SubprocessError:
             pass
+
+
+def fingerprint():
+    fields = ('pane_pid', 'session_name', 'window_index', 'pane_index', 'pane_id', 'pane_dead',
+              'pane_current_path', 'pane_active', 'pane_current_command', 'pane_title', '@name', '@kibitz_host_pane',
+              '@ssh_reconnect_pid', OPTION)
+    commands = [['list-panes', '-a', '-F', 'P\t' + '\t'.join('#{' + k + '}' for k in fields)],
+                ['list-windows', '-a', '-F', 'W\t#{session_name}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{window_flags}\t#{automatic-rename}'],
+                ['list-sessions', '-F', 'S\t#{session_name}\t#{session_grouped}\t#{session_group}'],
+                ['list-clients', '-F', 'C\t#{client_session}\t#{client_last_session}'],
+                ['show-options', '-g']]
+    raw = scheduled.commands(commands)
+    # Plugin notification counters and timer claims do not affect a recovery
+    # snapshot. Resurrect settings (including pane-content capture) do.
+    raw = '\n'.join(line for line in raw.splitlines()
+                    if line.startswith(('P\t', 'W\t', 'S\t', 'C\t', '@resurrect-')))
+    if option('@resurrect-capture-pane-contents') == 'on':
+        # Contents can change without topology changing; retain timed captures.
+        raw += '\n' + str(int(time.time()) // 60)
+    owners = []
+    for line in raw.splitlines():
+        if line.startswith('P\t'):
+            try:
+                fields = line.split('\t')
+                record = json.loads(fields[-1])
+                parents = runtime.ancestors(record['pid'])
+                owner = parents.get(record['pid'])
+                owners.append(bool(owner and int(fields[1]) in parents
+                                   and runtime.same_start(record['started'], owner['started'])))
+            except (ValueError, KeyError, TypeError):
+                owners.append(False)
+    return hashlib.sha256((raw + json.dumps(owners)).encode()).hexdigest()
+
+
+def checked_save(root, force=False):
+    before = fingerprint()
+    path = root / 'fingerprint.json'
+    try:
+        previous = json.loads(path.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    if (not force and not read_health(root).get('error') and (root / 'last').exists()
+            and previous.get('value') == before and time.time() - previous.get('saved', 0) < 900):
+        return 'unchanged'
+    if not save(root):
+        return False
+    # Store the input we actually saved, never a later state which we did not save.
+    if fingerprint() != before:
+        return False
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(dict(value=before, saved=time.time())) + '\n')
+    temporary.replace(path)
+    return True
 
 
 def save(root):
@@ -431,18 +551,20 @@ def setup():
             tmux("bind-key", key, "run-shell", "-b",
                  shlex.quote(wrapper) + (" manual" if action == "restore" else "")
                  + " --notify-client #{q:client_name} --notify-pid #{client_pid}")
-    command = shlex.join([str(SCRIPT), "save", "--background"])
+    tmux('set-option', '-gq', '@agent-indicator-now', '%s', ';',
+         'set-option', '-gq', '@agent_recovery_generation', uuid.uuid4().hex, ';',
+         'set-option', '-gqu', '@agent_recovery_pending')
+    command = save_request_command()
     for event in ("window-layout-changed", "session-created", "session-closed", "session-renamed", "window-renamed"):
-        for line in tmux("show-hooks", "-g", event).splitlines():
-            if str(SCRIPT) in line:
-                tmux("set-hook", "-gu", line.split(" ", 1)[0])
-        tmux("set-hook", "-ag", event, "run-shell -b " + shlex.quote(command))
+        navigation.register(event, command, str(SCRIPT), slot=901)
     # Snapshots are isolated by socket, so use Continuum's timer without its other-server guard.
     if not option("@continuum-save-last-timestamp"):
         tmux("set-option", "-gq", "@continuum-save-last-timestamp", str(int(time.time())))
     check = "#(" + str(CONTINUUM / "scripts/continuum_save.sh") + ")"
+    scheduled.install('recovery', [SCRIPT, 'save', '--background', '--timer'])
     status = option("status-right")
-    tmux("set-option", "-gq", "status-right", check + STATUS + status.replace(check, "").replace(STATUS, ""))
+    gate = '#{E:@agent-indicator-recovery-status}'
+    tmux("set-option", "-gq", "status-right", gate + STATUS + status.replace(check, "").replace(gate, '').replace(STATUS, ""))
     root = state_dir()
     with (root / "lock").open("a") as lock:
         try:
@@ -468,7 +590,10 @@ def disable(target=None):
     tmux("set-option", "-gq", "@agent_recovery_startup", "ready")
     status = option("status-right")
     check = "#(" + str(target.parent / "tmux-continuum/scripts/continuum_save.sh") + ")"
-    tmux("set-option", "-gq", "status-right", status.replace(check, "").replace(STATUS, ""))
+    tmux("set-option", "-gq", "status-right", status.replace(check, "").replace('#{E:@agent-indicator-recovery-status}', '').replace(STATUS, ""))
+    scheduled.clear('recovery')
+    for field in ('pending', 'requested_at', 'generation', 'serial'):
+        tmux('set-option', '-gqu', '@agent_recovery_' + field)
     tmux("set-option", "-gqu", "@agent_recovery_warning")
     for event in ("window-layout-changed", "session-created", "session-closed", "session-renamed", "window-renamed"):
         for line in tmux("show-hooks", "-g", event).splitlines():
@@ -498,6 +623,8 @@ def main():
     notify = "--notify-client" in sys.argv[2:]
     background = notify or action == "startup" or action == "save" and bool({"--background", "quiet"} & set(sys.argv[2:]))
     root = None
+    token = sys.argv[sys.argv.index('--scheduled') + 1] if '--scheduled' in sys.argv else None
+    retry = False
     # Keep the writer lock through error reporting so a failure cannot overwrite newer success.
     with ExitStack() as stack:
         try:
@@ -508,6 +635,8 @@ def main():
                 setup()
             elif action == "disable":
                 disable(sys.argv[2] if len(sys.argv) > 2 else None)
+            elif action == "ssh-end":
+                finish_ssh(*sys.argv[2:4])
             elif action in ("hook", "ssh"):
                 record(sys.argv[2] if action == "hook" else "ssh", sys.argv[2:])
             elif action in ("save", "restore", "startup"):
@@ -516,15 +645,21 @@ def main():
                         manual_feedback("disabled")
                     return
                 root = state_dir()
-                if action == "save" and not notify:
-                    time.sleep(0.5)
-                elif action == "startup":
+                if not scheduled.owns('recovery', token):
+                    return
+                if action == 'save' and '--requested' in sys.argv:
+                    if not take_request(sys.argv[sys.argv.index('--requested') + 1]):
+                        return
+                if action == "startup":
                     # Config loading may precede the initial session. Run after that command completes.
                     time.sleep(1)
                 lock = stack.enter_context((root / "lock").open("a"))
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | (0 if action == "startup" else fcntl.LOCK_NB))
                 except BlockingIOError:
+                    if action == 'save' and background:
+                        retry = True
+                        request_save(5)
                     if notify:
                         manual_feedback("another save or restore is running; try again")
                     return
@@ -537,25 +672,48 @@ def main():
                         # On failure leave saves blocked so the previous snapshot is preserved.
                         tmux("set-option", "-gq", "@agent_recovery_startup", "ready")
                 elif action == "save":
-                    if option("@agent_recovery_startup") == "ready" and save(root):
-                        saved_successfully(root)
+                    if option("@agent_recovery_startup") != "ready":
+                        if notify:
+                            manual_feedback("save skipped; startup restore is not ready")
+                        retry = True  # The periodic gate retries; do not queue a restore-time loop.
+                        return
+                    result = checked_save(root, force=notify or not background)
+                    if result:
+                        if result != 'unchanged':
+                            saved_successfully(root)
                         if notify:
                             manual_feedback("saved")
-                    elif notify:
-                        manual_feedback("save skipped; layout changed or startup restore is not ready")
+                    else:
+                        retry = True
+                        request_save(5)
+                        if notify:
+                            manual_feedback("save skipped; layout changed during the save")
                 else:
                     restored = restore(root, manual="manual" in sys.argv[2:])
                     tmux("set-option", "-gq", "@agent_recovery_startup", "ready")
                     if notify:
                         manual_feedback("restored" if restored else "no saved layout to restore")
         except ERRORS as error:
+            retry = True
             if action in ("save", "restore", "startup"):
                 report_failure(action, error, root)
+                if action == "save" and background:
+                    try:
+                        request_save(10)
+                    except ERRORS:
+                        pass
                 if notify:
                     manual_feedback(action + " failed; see recovery errors.log")
             if not background:
                 print(f"tmux-agent-indicator recovery: {error}", file=sys.stderr)
                 return 1
+        finally:
+            if token is not None:
+                try:
+                    interval = int(option('@continuum-save-interval') or '15') * 60
+                    scheduled.finish('recovery', token, 10 if retry else min(900, max(5, interval)))
+                except ERRORS:
+                    pass
 
 
 if __name__ == "__main__":

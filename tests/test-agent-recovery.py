@@ -176,7 +176,7 @@ os.execvp(kind, [kind, *args])
             customizations = (
                 'set-environment -g PATH ' + shlex.quote(env["PATH"]) + '\n'
                 "set -g default-command 'exec /bin/bash --noprofile --norc'\n"
-                "set-hook -g 'window-layout-changed[81]' 'display-message fixture-user-hook'\n"
+                "set-hook -g 'window-layout-changed[900]' 'display-message fixture-user-hook'\n"
             )
             local_config.write_text(customizations)
             assert (plugins / "tmux-resurrect/resurrect.tmux").is_file()
@@ -189,7 +189,7 @@ os.execvp(kind, [kind, *args])
             run("bash", "-c", '. "$1"; another_tmux_server_running_on_startup', "bash",
                 str(plugins / "tmux-continuum/scripts/helpers.sh"))
             t("source-file", str(home / ".tmux.conf"))
-            wait_for(lambda: "continuum_save.sh" in t("show", "-gqv", "status-right"))
+            wait_for(lambda: "#{E:@agent-indicator-recovery-status}" in t("show", "-gqv", "status-right"))
             wait_for(lambda: t("show", "-gqv", "@agent_recovery_startup") == "ready")
             run("python3", "-B", "-c", '''
 import hashlib, importlib.util, socket, sys
@@ -249,7 +249,8 @@ assert recovery.state_dir() != first
             run(str(recovery), "setup")
             assert len(logs()) == 4, "reloading after a snapshot is created must not restore it"
             status = t("show", "-gqv", "status-right")
-            assert status.count("continuum_save.sh") == 1 and "agent-present.sh sweep" in status
+            assert "continuum_save.sh" not in status and status.count("#{E:@agent-indicator-recovery-status}") == 1
+            assert "#{E:@agent-indicator-sweep-status}" in status
             assert status.count("?@agent_recovery_warning") == 1
             assert "fixture-user-hook" in t("show-hooks", "-g", "window-layout-changed")
             for path in (home / ".claude/settings.json", home / ".codex/hooks.json"):
@@ -354,6 +355,12 @@ assert recovery.state_dir() != first
             t('bind', '-n', 'F11', 'set', '-g', '@recovery-key-responsive', 'yes')
             previous_status = t('show', '-gqv', 'status-right')
             t('set', '-g', 'status-right', '')
+            # Isolate manual shortcuts from already queued automatic saves.
+            # Otherwise a background worker can enter the deliberately paused
+            # Resurrect script first and correctly return no client feedback.
+            t('set', '-g', '@agent_recovery_pending', 'fixture-manual', ';',
+              'set', '-g', '@agent_recovery_requested_at', str(int(time.time()) + 600), ';',
+              'set', '-g', '@agent-indicator-recovery-claim', 'fixture-manual')
             save_script = plugins / 'tmux-resurrect/scripts/save.sh'
             save_source = save_script.read_text()
             scripts = {'save': (save_script, save_source), 'restore': (restore_script, restore_source)}
@@ -364,10 +371,12 @@ assert recovery.state_dir() != first
                 real = script.with_name(action + '-shortcut-real.sh')
                 real.write_text(original_source)
                 started = work / (action + '-shortcut-started')
+                owner = work / (action + '-shortcut-owner')
                 release = work / (action + '-shortcut-release')
                 with (latest.parent / 'lock').open('a') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
-                    script.write_text('#!/bin/sh\n' + 'echo started >> ' + shlex.quote(str(started)) + '\n'
+                    script.write_text('#!/bin/sh\n' + 'printf "%s\\n" "$PPID" > ' + shlex.quote(str(owner)) + '\n'
+                        'echo started >> ' + shlex.quote(str(started)) + '\n'
                         'while [ ! -f ' + shlex.quote(str(release)) + ' ]; do sleep 0.1; done\n'
                         'exec bash ' + shlex.quote(str(real)) + ' "$@"\n')
                 busy = 'Recovery: another save or restore is running; try again'
@@ -376,6 +385,8 @@ assert recovery.state_dir() != first
                 try:
                     os.write(master, b'\x02' + key)
                     wait_for(started.exists)
+                    worker = run('ps', '-p', owner.read_text().strip(), '-o', 'command=').stdout.strip()
+                    assert '--notify-client' in worker, worker
                     t('set', '-g', '@recovery-key-responsive', '')
                     os.write(master, b'\033[23~')
                     wait_for(lambda: t('show', '-gqv', '@recovery-key-responsive') == 'yes', seconds=2)
@@ -384,7 +395,10 @@ assert recovery.state_dir() != first
                     assert started.read_text().splitlines() == ['started'], 'overlapping recovery operations'
                 finally:
                     release.touch()
-                wait_for(lambda: 'Recovery: ' + completed in messages())
+                try:
+                    wait_for(lambda: 'Recovery: ' + completed in messages())
+                except AssertionError:
+                    raise AssertionError(f'{action} shortcut worker: {worker}\nMessages:\n{messages()}') from None
                 assert b'Recovery: ' + completed.encode() not in client_output[editor.pid][other_start:], 'feedback went to the other client'
                 assert client_sessions() == expected_sessions
                 script.write_text(original_source)
@@ -401,6 +415,8 @@ assert recovery.state_dir() != first
             count = messages().count('Recovery: saved')
             run(str(recovery), 'save', '--notify-client', target, '--notify-pid', '0')
             assert messages().count('Recovery: saved') == count, 'a reused client name received stale feedback'
+            t('set', '-gu', '@agent_recovery_pending', ';',
+              'set', '-gu', '@agent-indicator-recovery-claim')
             t('set', '-g', 'status-right', previous_status)
             print('PASS: recovery shortcuts keep keys responsive, serialize work, and report results to their requesting client', flush=True)
             for client in (terminal, editor):
@@ -426,7 +442,7 @@ assert recovery.state_dir() != first
             t("set", "-g", "@agent-indicator-recovery", "off")
             run(str(recovery), "setup")
             assert "continuum_save.sh" not in t("show", "-gqv", "status-right")
-            assert "agent-present.sh sweep" in t("show", "-gqv", "status-right")
+            assert "#{E:@agent-indicator-sweep-status}" in t("show", "-gqv", "status-right")
             t("set", "-g", "@agent-indicator-recovery", "on")
             run(str(recovery), "setup")
             save_script = plugins / "tmux-resurrect/scripts/save.sh"
@@ -483,7 +499,15 @@ sys.exit(recovery.main())
                      and not t("show", "-gqv", "@agent_recovery_warning"))
             saved = latest.read_text()
             saved_path = latest.resolve()
-            save_script.write_text("#!/bin/sh\nexit 1\n")
+            # An unchanged automatic check must now skip Resurrect. Expire the
+            # backstop to force a real attempt with the same snapshot inputs.
+            with (latest.parent / 'lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                fingerprint = latest.parent / 'fingerprint.json'
+                expired = json.loads(fingerprint.read_text())
+                expired['saved'] = time.time() - 901
+                fingerprint.write_text(json.dumps(expired))
+                save_script.write_text("#!/bin/sh\nexit 1\n")
             run(str(recovery), "save", "--background")
             assert t("show", "-gqv", "@agent_recovery_warning")
             save_script.write_text(save_source)
@@ -540,7 +564,8 @@ sys.exit(recovery.main())
                 t("source-file", str(home / ".tmux.conf"))
                 time.sleep(1.2)
                 assert len(logs()) == before and not t("show", "-gqv", "@agent_recovery_restored"), mode
-                assert t("show", "-gqv", "status-right").count("continuum_save.sh") == 1
+                status = t("show", "-gqv", "status-right")
+                assert status.count("#{E:@agent-indicator-recovery-status}") == 1 and "continuum_save.sh" not in status
             print("PASS: live installation, disabled restore and the halt file prevent startup recovery across reloads", flush=True)
 
             stop_server()

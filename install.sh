@@ -282,6 +282,7 @@ put_tagged_line() {
 
 if [ "$UNINSTALL_ALL" = true ]; then
     python3 "$SCRIPT_DIR/scripts/agent-recovery.py" disable "$TARGET_DIR"
+    python3 "$SCRIPT_DIR/scripts/navigation.py" disable "$TARGET_DIR"
     python3 "$SCRIPT_DIR/scripts/recovery-dependencies.py" --uninstall
     for f in "$TMUX_CONF" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" "$HS_DIR/init.lua"; do
         remove_tagged_lines "$f"
@@ -316,8 +317,12 @@ if [ "$UNINSTALL_ALL" = false ]; then
     cp "$SCRIPT_DIR/README.md" "$TARGET_DIR/"
     cp "$SCRIPT_DIR/LICENSE" "$TARGET_DIR/"
     cp "$SCRIPT_DIR/licenses/"*.txt "$TARGET_DIR/licenses/"
-    cp "$SCRIPT_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"
+    # Install new Python dependencies before their callers, and the frontend
+    # before agent-state.sh starts dispatching live hooks through it.
+    cp "$SCRIPT_DIR/scripts/runtime.py" "$SCRIPT_DIR/scripts/scheduled.py" \
+        "$SCRIPT_DIR/scripts/navigation.py" "$TARGET_DIR/scripts/"
     cp "$SCRIPT_DIR/scripts/"*.py "$TARGET_DIR/scripts/"
+    cp "$SCRIPT_DIR/scripts/"*.sh "$TARGET_DIR/scripts/"
     cp "$SCRIPT_DIR/scripts/slack-badge.js" "$TARGET_DIR/scripts/"
     cp "$SCRIPT_DIR/hooks/"*.json "$TARGET_DIR/hooks/"
     cp "$SCRIPT_DIR/plugins/"*.js "$TARGET_DIR/plugins/"
@@ -394,7 +399,10 @@ if [ "$INSTALL_CLAUDE" = true ] || [ "$UNINSTALL_CLAUDE" = true ]; then
 import base64
 import json
 import pathlib
+import os
+import re
 import shlex
+import subprocess
 import sys
 import runpy
 
@@ -492,7 +500,23 @@ status_line = settings.get("statusLine")
 status_command = status_line.get("command", "") if isinstance(status_line, dict) else ""
 wrapped, previous_command = unwrap_statusline(status_command)
 
-if mode == "install" and (status_line is None or isinstance(status_line, dict)):
+limits_visible = False
+for path in (pathlib.Path.home() / '.tmux.conf', pathlib.Path.home() / '.tmux/agent-indicator.local.conf'):
+    if path.is_file():
+        limits_visible |= any(('agent_limits' in line or '/agent-limits.sh' in line)
+                              and line.strip() and not line.lstrip().startswith('#')
+                              for line in path.read_text().splitlines())
+if os.environ.get('TMUX'):
+    try:
+        installed = subprocess.check_output(['tmux', 'show-environment', '-g', 'TMUX_AGENT_INDICATOR_DIR'],
+                                            text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+        if installed == 'TMUX_AGENT_INDICATOR_DIR=' + target_dir:
+            options = subprocess.check_output(['tmux', 'show-options', '-g'], text=True, timeout=5)
+            limits_visible |= bool(re.search(r'agent_limits|/agent-limits.sh', options))
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+if mode == "install" and limits_visible and (status_line is None or isinstance(status_line, dict)):
     if not wrapped:
         previous_command = status_command
     encoded = base64.b64encode(previous_command.encode("utf-8")).decode("ascii")
@@ -504,7 +528,7 @@ if mode == "install" and (status_line is None or isinstance(status_line, dict)):
     updated["type"] = "command"
     updated["command"] = command
     settings["statusLine"] = updated
-elif mode == "uninstall" and wrapped:
+elif wrapped:
     if previous_command:
         updated = dict(status_line)
         updated["command"] = previous_command

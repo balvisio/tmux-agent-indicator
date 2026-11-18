@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Bound sweep process cost and exercise coalescing with real isolated tmux servers."""
 import fcntl
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -41,7 +43,9 @@ with open(os.environ["TEST_CALLS"], "a") as stream:
 Path(os.environ["TEST_SEEN"]).touch()
 while Path(os.environ["TEST_GATE"]).exists():
     time.sleep(0.05)
-print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
+for line in Path(os.environ["TEST_PROCESSES"]).read_text().splitlines():
+    pid, parent, tty, command = line.split(None, 3)
+    print(pid, parent, tty, "Mon Nov 16 12:00:00 2026", command)
 ''')
         for name in ("tmux", "ps"):
             (home / name).chmod(0o755)
@@ -62,7 +66,16 @@ print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
             tmux("set", "-g", "@agent-indicator-style-active-window", "on")
             tmux("set", "-g", "@agent-indicator-running-window-title-bg", "yellow")
             tmux("set", "-g", "@agent-indicator-running-window-title-fg", "black")
-            return tmux, dict(inside, TMUX=f"{path},{pid},0"), locks[-2]
+            for line in (ROOT / "config/agent-indicator.conf").read_text().splitlines():
+                if line.startswith(("set -g automatic-rename-format ", "set -g window-status-format ",
+                                    "set -g window-status-current-format ")):
+                    tmux(*shlex.split(line))
+            environment = dict(inside, TMUX=f"{path},{pid},0")
+            subprocess.run(["bash", str(ROOT / "agent-indicator.tmux")], env=environment,
+                           check=True, capture_output=True, timeout=15)
+            subprocess.run([sys.executable, str(ROOT / "scripts/state-lock.py"), "--wait", "--barrier"],
+                           env=environment, check=True, timeout=15)
+            return tmux, environment, locks[-2]
 
         def start(environment, periodic=True):
             command = [sys.executable, str(ROOT / "scripts/agent-present.py"), "sweep"]
@@ -87,6 +100,24 @@ print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
         def state(tmux, pane, pid, value):
             for suffix, content in (("STATE", value), ("PID", pid), ("AGENT", "claude")):
                 tmux("set-environment", "-g", f"TMUX_AGENT_PANE_{pane}_{suffix}", content)
+            # This fixture publishes state directly, including the native
+            # focus-admission flag normally written by render_window_state.
+            tmux('set', '-wq', '-t', pane, '@agent-indicator-ack-needed', str(int(value == 'done')))
+
+        def named(tmux, window, name, icons):
+            def current():
+                return (tmux("display", "-p", "-t", window, "#{window_name}") == name
+                        and tmux("show-options", "-wqv", "-t", window, "@agent_label") == icons + " " + name)
+            try:
+                until(current, f"window {window} and menu label did not acquire {name!r}")
+            except AssertionError as error:
+                actual = tmux("display", "-p", "-t", window,
+                              "#{window_name}|#{@agent_label}|#{@agent_name}|#{automatic-rename}")
+                raise AssertionError(f"{error}; actual: {actual!r}") from error
+            for option in ("window-status-format", "window-status-current-format"):
+                title = tmux("display", "-p", "-t", window, "#{E:" + option + "}")
+                assert name in title, title
+            assert tmux("show-options", "-wqv", "-t", window, "@agent_icons") == icons
 
         try:
             tmux, environment, writer_lock = server()
@@ -104,8 +135,46 @@ print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
             assert len(large) <= len(small) + 1 and len(large) < 25, (small, large)
             print(f"PASS: one process scan and bounded tmux launches for 1 and 8 windows ({len(large)} launches)", flush=True)
 
-            # All literal label characters survive the streamed writer, including
-            # a newline, dollar sign, format expression, quotes and backslash.
+            # Codex names use live hook identities, including before a first prompt.
+            codex_home = home / "custom codex"
+            codex_home.mkdir()
+            sessions_by_pane = {}
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as db, db:
+                db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, preview TEXT)")
+                for pane, pid, tty, window in panes:
+                    session = str(uuid.uuid4())
+                    sessions_by_pane[pane] = session
+                    db.execute("INSERT INTO threads VALUES (?, ?, ?)", (session, "Codex " + pane, "Generated preview"))
+                    record = dict(kind="codex", session=session, pid=int(pid), started="Mon Nov 16 12:00:00 2026",
+                                  env={"CODEX_HOME": str(codex_home)})
+                    tmux("set", "-pq", "-t", pane, "@agent_recovery", json.dumps(record))
+            process_file.write_text("".join(f"{pid} 1 {tty[5:]} codex --no-daemon\n" for pane, pid, tty, window in panes))
+            log.write_text("")
+            finish(start(environment))
+            named_calls = log.read_text().splitlines()
+            assert named_calls.count("ps") == 1 and len(named_calls) <= len(large), named_calls
+            for pane, pid, tty, window in panes:
+                named(tmux, window, "Codex " + pane, "🧠")
+                assert not tmux("show-options", "-wqv", "-t", window, "automatic-rename"), "name refresh overrode inherited automatic naming"
+            pane, pid, tty, window = panes[0]
+            renamed = 'review | "quotes" $HOME #{pane_id} \\ next\nline'
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as db, db:
+                db.execute("UPDATE threads SET name=? WHERE id=?", (renamed, sessions_by_pane[pane]))
+            finish(start(environment))
+            assert tmux("show-options", "-wqv", "-t", window, "@agent_name") == renamed.replace("\n", " ")
+            named(tmux, window, renamed.replace("\n", " ").replace("\\", "\\\\"), "🧠")
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as db, db:
+                db.execute("UPDATE threads SET name=NULL WHERE id=?", (sessions_by_pane[pane],))
+            finish(start(environment))
+            named(tmux, window, "codex", "🧠")
+            for pane, pid, tty, window in panes:
+                tmux("set", "-pqu", "-t", pane, "@agent_recovery")
+            panes = fixture(tmux)
+            print("PASS: Codex window names, bar and menu labels follow renames literally without extra sweep processes", flush=True)
+
+            # Text reaches native naming literally, including dollars and formats.
+            # Tmux escapes backslashes in names, even with manual rename-window.
+            # Newlines become spaces so automatic naming accepts the title.
             pane, pid, tty, window = panes[0]
             name = 'one | "two" $HOME #{pane_id} \\ three\nnext'
             sessions = home / ".claude/sessions"
@@ -113,7 +182,8 @@ print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
             (sessions / "1.json").write_text(json.dumps(dict(tmux="server." + pane, name=name, nameSource="user")))
             state(tmux, pane, pid, "running")
             finish(start(environment))
-            assert tmux("show-options", "-wqv", "-t", window, "@agent_label") == "🤖 " + name
+            assert tmux("show-options", "-wqv", "-t", window, "@agent_name") == name.replace("\n", " ")
+            named(tmux, window, name.replace("\n", " ").replace("\\", "\\\\"), "🤖")
             assert tmux("show-options", "-wqv", "-t", window, "window-status-style") == "bg=yellow,fg=black"
             assert tmux("show-environment", "-g", f"TMUX_AGENT_WINDOW_{window}_ORIG_STATUS_STYLE").endswith("=bg=blue,fg=white")
             state(tmux, pane, pid, "needs-input")
@@ -126,6 +196,58 @@ print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
             finish(start(environment))
             assert tmux("show-options", "-wqv", "-t", window, "window-status-style") == "bg=blue,fg=white"
             print("PASS: batched labels preserve literal characters and active styles restore the idle baseline", flush=True)
+
+            tmux("rename-window", "-t", window, "my manual title")
+            named(tmux, window, "my manual title", "🤖")
+            (sessions / "1.json").write_text(json.dumps(dict(tmux="server." + pane, name="new conversation name", nameSource="user")))
+            finish(start(environment))
+            named(tmux, window, "my manual title", "🤖")
+            assert tmux("show-options", "-wv", "-t", window, "automatic-rename") == "off"
+            inactive = panes[1][3]
+            tmux("rename-window", "-t", inactive, "inactive manual title")
+            named(tmux, inactive, "inactive manual title", "🤖")
+            named(tmux, window, "my manual title", "🤖")
+            tmux("set", "-w", "-t", inactive, "automatic-rename", "on")
+            tmux("set", "-w", "-t", window, "automatic-rename", "on")
+            named(tmux, window, "new conversation name", "🤖")
+            for literal in ("0", "0-prefixed name", "__UNSET__"):
+                (sessions / "1.json").write_text(json.dumps(dict(tmux="server." + pane, name=literal, nameSource="user")))
+                finish(start(environment))
+                named(tmux, window, literal, "🤖")
+            print("PASS: manual renames win, inactive-window hooks target correctly, and zero/sentinel names stay literal", flush=True)
+
+            peer, peer_pid, peer_tty = tmux("split-window", "-d", "-t", window, "-P", "-F",
+                                           "#{pane_id}|#{pane_pid}|#{pane_tty}",
+                                           "/bin/bash --noprofile --norc").split("|")
+            peer_session = str(uuid.uuid4())
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as db, db:
+                db.execute("INSERT INTO threads VALUES (?, ?, ?)", (peer_session, "Codex reviewer", "preview"))
+            tmux("set", "-pq", "-t", peer, "@agent_recovery", json.dumps(dict(
+                kind="codex", session=peer_session, pid=int(peer_pid), started="Mon Nov 16 12:00:00 2026",
+                env={"CODEX_HOME": str(codex_home)})))
+            process_file.write_text(process_file.read_text() + f"{peer_pid} 1 {peer_tty[5:]} codex\n")
+            finish(start(environment))
+            named(tmux, window, "__UNSET__", "🤖🧠")
+            (sessions / "1.json").write_text(json.dumps(dict(tmux="server." + pane, name="derived-name", nameSource="derived")))
+            finish(start(environment))
+            named(tmux, window, "Codex reviewer", "🤖🧠")
+            tmux("kill-pane", "-t", peer)
+            panes = fixture(tmux)
+            finish(start(environment))
+            named(tmux, window, "claude", "🤖")
+            print("PASS: paired windows prefer Claude's explicit name and fall back to Codex or the agent type", flush=True)
+
+            tmux("rename-window", "-t", inactive, "keep after exit")
+            process_file.write_text("".join(f"{p} 1 {t[5:]} /bin/bash\n" for _, p, t, _ in panes))
+            finish(start(environment))
+            until(lambda: tmux("display", "-p", "-t", window, "#{window_name}") == "bash", "agent exit kept its name")
+            assert tmux("display", "-p", "-t", inactive, "#{window_name}") == "keep after exit"
+            for option in ("@agent_name", "@agent_icons", "@agent_label"):
+                assert not tmux("show-options", "-wqv", "-t", window, option), option
+            tmux("set", "-w", "-t", inactive, "automatic-rename", "on")
+            fixture(tmux)
+            finish(start(environment))
+            print("PASS: agent exit restores command names, preserves manual titles and removes agent decoration", flush=True)
 
             # Two concurrent requests must only do one process scan.
             other_tmux, other_env, _ = server()
@@ -205,7 +327,7 @@ print(Path(os.environ["TEST_PROCESSES"]).read_text(), end="")
                 # Drain asynchronous focus writers before server shutdown can
                 # kill a waiter between ticket creation and normal cleanup.
                 barrier = shlex.join([sys.executable, str(ROOT / "scripts/state-lock.py"),
-                                      "--wait", "/dev/null"])
+                                      "--wait", "--barrier"])
                 subprocess.run([TMUX, "-L", socket, "run-shell", barrier], env=inside,
                                capture_output=True, timeout=20)
                 subprocess.run([TMUX, "-L", socket, "kill-server"], env=env, capture_output=True)

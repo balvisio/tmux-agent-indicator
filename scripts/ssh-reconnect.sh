@@ -28,7 +28,9 @@ for arg in "$@"; do
 done
 [ -n "$host" ] || usage
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+script_dir="$(cd "$script_dir" && pwd)"
 in_tmux=0
 [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] && in_tmux=1
 
@@ -39,7 +41,9 @@ cleanup() {
         wait "$child" 2>/dev/null
     fi
     if [ "$in_tmux" = 1 ]; then
-        tmux set-option -pqu -t "$TMUX_PANE" @ssh_reconnect_host \; set-option -pqu -t "$TMUX_PANE" @ssh_reconnect_pid 2>/dev/null
+        "$script_dir/agent-recovery.py" ssh-end "$TMUX_PANE" "$$" 2>/dev/null || true
+        tmux if-shell -F -t "$TMUX_PANE" "#{==:#{@ssh_reconnect_pid},$$}" \
+            "set-option -pqu -t $TMUX_PANE @ssh_reconnect_host ; set-option -pqu -t $TMUX_PANE @ssh_reconnect_pid" 2>/dev/null
         tmux run-shell -b "$script_dir/agent-present.sh sweep" 2>/dev/null
     fi
 }

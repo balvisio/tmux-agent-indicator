@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+[ "$SCRIPT_DIR" != "${BASH_SOURCE[0]}" ] || SCRIPT_DIR=.
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
 
 if ! command -v tmux >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
     exit 0

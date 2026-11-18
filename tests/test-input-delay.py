@@ -444,7 +444,7 @@ class TmuxTest(unittest.TestCase):
             if condition():
                 return
             time.sleep(.05)
-        self.fail("condition timed out")
+        self.fail("condition timed out: " + repr(dict(state=self.state(), question=self.question_record(), bells=self.bells())))
 
     def native(self, value):
         (self.root / "one").write_text(value)

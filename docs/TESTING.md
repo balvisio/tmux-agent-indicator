@@ -27,6 +27,7 @@ Run individual checks:
 ./tests/test-state-transitions.sh
 ./tests/test-indicator-output.sh
 ./tests/test-pane-presence.py
+./tests/test-codex-names.py
 ./tests/test-sweep.py
 ./tests/test-focus-reset-done.sh
 ./tests/test-window-title-reset.sh
@@ -51,12 +52,39 @@ Run individual checks:
 ./tests/test-agent-recovery.py
 ```
 
+The optimization suites (`tests/test-scheduled.py`, `tests/test-optimization.py`, and
+`tests/test-launch-budget.py`) check native admission and expiry, stale-worker fencing, recovery
+coalescing, unchanged/manual/failed-save behavior, missing and stale tmux identities, and a later
+conditional hook arriving while an earlier question still reads stdin or finishes during the state
+read. Native layout signatures must match the writer's published record exactly. The launch budget checks
+at most four executable entries for a no-op tool hook and zero for ordinary window switches.
+Counts cover PATH-resolved programs, excluding the agent launcher and absolute shebang interpreters;
+wall times are printed separately because process scanning by security software varies.
+`tests/test-runtime.py` covers denied native reads, root-owned login ancestry, missing/zombie
+processes, fallback failures, and stopping at the owning server. `tests/test-navigation-failures.py`
+injects real worker failures on an isolated tmux server: requests must clear without re-arming,
+newer requests must survive, and a later successful event must still reconcile normally.
+
 The sweep tests count process and tmux launches with one and eight windows. They check one process
-scan, bounded client launches, literal labels, restoration of idle styles, concurrent sweep coalescing,
+scan, bounded client launches (including named Codex windows), literal window names, restoration of idle styles, concurrent sweep coalescing,
 independent servers, explicit refreshes waiting for a fresh scan, contention lasting beyond the
 hook-detachment threshold, process replacement,
 and navigation while the state writer is locked. Stale focus events must not acknowledge another
-window, and a process scan must not overwrite newer agent state.
+window, and a process scan must not overwrite newer agent state. Real window names, the rendered bar,
+and menu-bar labels must agree for both Claude and Codex, including quiet panes, manual overrides,
+inactive-window renames, zero-prefixed names, and literal `__UNSET__` names. Control characters become
+spaces so native automatic naming accepts the title. Paired windows prefer
+Claude's explicit name; agent exit restores command naming without overwriting manual titles.
+
+Codex name tests cover live pane/process ownership, PID reuse, changed conversation identity,
+custom Codex homes, read-only batched database access, rename refreshes, and missing/locked/corrupt
+metadata. They reject generated previews and keep Claude's explicit name in paired windows.
+SessionStart still records the conversation when recovery is disabled, without scheduling a backup.
+For a manual check, run `/rename` in Claude and in a standalone Codex pane: the real window name and
+bar should acquire the new name on the next status sweep, normally within five seconds, without
+changing the state color. Open tmux's rename prompt (prefix + comma) to confirm it contains the same
+name without icons, then cancel the prompt. A manual tmux rename should persist through later agent
+renames and exit; `tmux setw automatic-rename on` should resume automatic naming.
 
 The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
 process inside the test pane. They verify early and late answers, stale status, parallel tools,

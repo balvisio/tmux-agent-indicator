@@ -38,7 +38,10 @@ def hook_data(payload):
     result = {key: payload.get(key, "") for key in
               ("session_id", "prompt_id", "turn_id", "hook_event_name", "tool_use_id", "call_id",
                "transcript_path")}
-    result["received_at"] = input_status.time.time()
+    try:
+        result["received_at"] = float(os.environ.get("TMUX_AGENT_RECEIVED_AT", ""))
+    except ValueError:
+        result["received_at"] = input_status.time.time()
     result["claude_config_dir"] = os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
     # Keep only the fact that shell work remains, never commands or task output.
     if isinstance(payload.get("background_tasks"), list):
@@ -545,12 +548,15 @@ def main():
         del tracker.reviews[key]
     commands = []
     for pane in live:
+        commands.append(["set-option", "-pq", "-t", pane, "@agent-indicator-track-owner",
+                         live[pane]["pid"] if tracker.panes[pane]["state"] in ("running", "needs-input", "done") else ""])
         commands.append(["set-option", "-pq", "-t", pane, "@agent-indicator-input-pending",
                          questions.records.get(pane, {}).get("token", "")])
         commands.append(["set-option", "-pq", "-t", pane, "@agent-indicator-interrupt",
                          tracker.interrupt_token(pane)])
     commands.insert(0, ["set-option", "-gq", OPTION, json.dumps(data, separators=(",", ":"))])
     for wid, window in tracker.windows.items():
+        commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-ack-held", str(int(bool(window["pending"])))])
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-completion",
                          f'{data["epoch"]}:{window["sequence"]}:{int(window["ready"])}'])
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-review-pending",

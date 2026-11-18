@@ -122,8 +122,8 @@ sweep
 [ "$(t show -t "$OTHER_SES" -v prefix)" = C-z ] || fail "unrelated session changed"
 echo "PASS: stale and closed owners release passthrough without changing other sessions"
 
-# Keep manual key routing bounded to identity checks around the lock, one
-# snapshot, and one mutation. Custom tables must not need per-option calls.
+# Native process identity needs no tmux queries. Keep manual key routing to one
+# snapshot and one mutation. Custom tables must not need per-option calls.
 mkdir "$WORK/counter-bin"
 cat > "$WORK/counter-bin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -140,7 +140,7 @@ for action in on off; do
     TMUX_QUERY_REAL="$(command -v tmux)" TMUX_QUERY_LOG="$WORK/queries" \
         PATH="$WORK/counter-bin:$PATH" "$S" "$action" "$OTHER_SES" "$other_pane"
     count=$(wc -l < "$WORK/queries" | tr -d ' ')
-    [ "$count" -eq 4 ] || fail "manual $action used $count tmux calls instead of four"
+    [ "$count" -eq 2 ] || fail "manual $action used $count tmux calls instead of two"
 done
 [ "$(t show -t "$OTHER_SES" -qv key-table)" = "$custom_table" ] || fail "quoted custom key table was not restored"
-echo "PASS: manual toggles use four tmux calls and round-trip a quoted custom key table"
+echo "PASS: manual toggles use two tmux calls and round-trip a quoted custom key table"

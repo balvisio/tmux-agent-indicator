@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$(dirname "${BASH_SOURCE[0]}")/agent-recovery.py" save "$@"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+exec "$script_dir/agent-recovery.py" save "$@"

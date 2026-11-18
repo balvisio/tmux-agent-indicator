@@ -3,6 +3,24 @@
 
 set -euo pipefail
 
+# Publish arrival before interpreter startup or tmux queries. Other hooks cannot
+# mistake a question still entering the writer for an idle pane.
+if [ "${1:-}" != --agent-state-lock-held ] && [ "${1:-}" != --agent-event-prepared ]; then
+    unset TMUX_AGENT_ARRIVAL TMUX_AGENT_WRITER_MARKER
+    export TMUX_AGENT_RECEIVED_AT="${EPOCHREALTIME:-}"
+    arrival_dir="${TMUX_AGENT_RUNTIME_ROOT:-/tmp/tmux-agent-indicator-$UID}/arrivals"
+    if [ -d "$arrival_dir" ] && [ ! -L "$arrival_dir" ] && [ -O "$arrival_dir" ]; then
+        export TMUX_AGENT_ARRIVAL="$arrival_dir/$$-$RANDOM"
+        printf '%s' "$$" > "$TMUX_AGENT_ARRIVAL"
+    fi
+    entry_dir="${BASH_SOURCE[0]%/*}"
+    [ "$entry_dir" != "${BASH_SOURCE[0]}" ] || entry_dir=.
+    exec python3 "$entry_dir/hook-entry.py" "$0" "$@"
+fi
+if [ "${1:-}" = --agent-event-prepared ]; then
+    shift
+fi
+
 usage() {
     cat <<'EOF' >&2
 Usage: agent-state.sh --agent <name> --state <running|needs-input|done|off> [--if-state <state>]
@@ -14,7 +32,9 @@ if ! command -v tmux >/dev/null 2>&1 || [ -z "${TMUX:-}" ]; then
     exit 0
 fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+script_dir="$(cd "$script_dir" && pwd)"
 source "$script_dir/state-lib.sh"
 locked=false
 if [ "${1:-}" = --agent-state-lock-held ]; then
@@ -23,49 +43,12 @@ if [ "${1:-}" = --agent-state-lock-held ]; then
 fi
 original_args=("$@")
 
-# Codex --no-daemon hooks descend from their pane's starting process (pane_pid).
-# TMUX_PANE can be missing or stale, so find that process in the hook's ancestry.
-resolve_pane_by_ancestry() {
-    local panes cur match hops=0
-    panes=$(tmux list-panes -a -F '#{pane_pid} #{pane_id}' 2>/dev/null || true)
-    [ -n "$panes" ] || return 0
-    cur=$$
-    while [ "$hops" -lt 40 ]; do
-        case "$cur" in ""|0|1|*[!0-9]*) break ;; esac
-        match=$(printf '%s\n' "$panes" | awk -v p="$cur" '$1 == p { print $2; exit }')
-        if [ -n "$match" ]; then
-            printf '%s\n' "$match"
-            return 0
-        fi
-        cur=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]' || true)
-        hops=$((hops + 1))
-    done
-    return 0
-}
-
-resolve_target_pane() {
-    local agent="$1"
-
-    if [ "$agent" = codex ]; then
-        resolve_pane_by_ancestry
-        return
-    fi
-
-    # Other agents supply their pane directly (Claude does this).
-    if [ -n "${TMUX_PANE:-}" ] && pane_exists "$TMUX_PANE"; then
-        printf '%s\n' "$TMUX_PANE"
-    fi
-}
-
-
 agent=""
 state=""
 if_state=""
-hook=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --hook)
-            hook=true
             shift
             ;;
         --agent)
@@ -110,19 +93,11 @@ case "$if_state" in
         ;;
 esac
 
-if [ "$hook" = true ] && [ "$locked" = false ] && [ ! -t 0 ]; then
-    TMUX_AGENT_HOOK_DATA=$(python3 "$script_dir/notification-state.py" hook-data "$agent")
-    [ -n "$TMUX_AGENT_HOOK_DATA" ] || exit 0
-    export TMUX_AGENT_HOOK_DATA
-fi
-
 if [ "$locked" = true ]; then
     load_state_snapshot
     prune_pane_states
-    pane_id="$TMUX_AGENT_EVENT_PANE"
-else
-    pane_id=$(resolve_target_pane "$agent")
 fi
+pane_id="$TMUX_AGENT_EVENT_PANE"
 if [ -z "$pane_id" ]; then
     # Ignore hooks that cannot be attributed to a live pane.
     exit 0
@@ -132,7 +107,6 @@ if [ "$locked" = false ]; then
     # Resolve Codex ancestry while the hook still belongs to its original process
     # tree. A contended writer may continue after its hook runner has returned.
     export TMUX_AGENT_EVENT_PANE="$pane_id"
-    TMUX_AGENT_EVENT_PANE_PID="$(tmux display-message -p -t "$pane_id" '#{pane_pid}')"
     export TMUX_AGENT_EVENT_PANE_PID
     lock_agent_state "${original_args[@]}"
 fi

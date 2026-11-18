@@ -67,8 +67,10 @@ After a tmux server restart, start tmux normally. Its saved windows, splits and 
 return, and Claude/Codex reopen the conversation recorded for each pane. Start new agent sessions
 after installation, and trust the updated Codex hooks in `/hooks`.
 
-Layouts are saved every minute while the status bar is refreshing, and after agent starts and layout
-changes. `prefix` then **Ctrl-S** saves now; `prefix` then **Ctrl-R** restores the latest snapshot.
+Agent starts and layout changes request a save after a two-second coalescing period. Unchanged
+snapshots are skipped; a periodic check forces a fresh save at least every 15 minutes while the
+status bar refreshes. Failed saves retry soon and keep their warning until a real save succeeds.
+`prefix` then **Ctrl-S** always saves now; `prefix` then **Ctrl-R** restores the latest snapshot.
 Both shortcuts run in the background, keeping terminal input responsive. The requesting terminal
 shows progress and the result, including failures or a busy recovery writer. Saves and restores
 remain serialized; a busy shortcut asks you to retry rather than starting another operation.
@@ -371,24 +373,60 @@ Writers acquire the lock in queue order. After two seconds of contention, a hook
 and its detached retry keeps waiting; the update is applied when earlier writers finish. This keeps
 agent hooks responsive without dropping or reordering state transitions. Codex resolves its pane
 before detaching, and queued events are discarded if that pane was replaced or the server stopped.
+Conditional tool-completion hooks first read pane state and the pending question in one tmux call.
+They skip the writer only when there is no applicable transition, pending question, earlier arrival
+or active writer affecting that pane. Writers are checked before and after the read, so a concurrent
+update cannot make a stale snapshot look safe to skip. Other panes keep their fast path while a
+neighbour works; writers that reconcile a whole window/server remain
+conservative. Arrival markers remain visible through payload parsing and lock application.
+Process birth times and the server socket identify the cache; Codex hooks without tmux variables
+recover their own ancestor server instead of guessing the default one. If native inspection is
+denied for a process such as a root-owned login shell, a targeted `ps` read supplies its ancestry.
+The walk stops at the tmux server, keeping ordinary hooks on the native path.
 Full sweeps collect process information before taking the writer lock, then batch their window
 reads and changed styles in one apply phase. Overlapping periodic sweeps (`sweep --if-idle`) exit
 immediately, including while the first sweep is waiting for the writer lock. Explicit sweeps wait
 and scan fresh state, so SSH lifecycle refreshes are not lost. Focus hooks run in the
-background and recheck the selected pane after acquiring the lock, so navigation does not wait for
-bookkeeping. The empty lock files next to the tmux socket are intentional and must not be deleted
+background only when a completed pane or held notification needs acknowledgement. Ordinary
+window switches launch no plugin programs. Focus is checked before and after the lock, so stale
+navigation cannot acknowledge another window. Layout hooks compare pane IDs, processes and dead
+flags before requesting reconciliation; recovery hooks use a separate fixed slot and survive reloads. The empty lock files next to the tmux socket are intentional and must not be deleted
 while that server has active writers.
+Failed focus and layout workers release their pending request without immediately re-arming;
+later navigation and periodic reconciliation can retry after the failure is resolved.
 
-#### Presence labels
+#### Window names and presence
 
-`scripts/agent-present.sh sweep` maintains blue idle styling, `@agent_present`, `@agent_label`, and
-`@ssh_host` for integrations such as the Hammerspoon dots. Each sweep uses one process snapshot
-and reads Claude session names once, regardless of the number of windows. Detection requires both
+`scripts/agent-present.sh sweep` maintains blue idle styling, `@agent_present`, `@agent_name`,
+`@agent_icons`, and `@ssh_host`. The shipped `automatic-rename-format` uses the detected Claude or
+Codex conversation name as the real tmux window name. The bar adds agent icons separately, so its
+text agrees with the window picker, rename prompt, and notification titles. The menu-bar display
+field `@agent_label` is derived from the icons and real window name; a native tmux hook keeps it
+current without starting another process.
+
+Each sweep uses one process snapshot and reads Claude session names once and Codex names once per
+Codex home, regardless of the number of windows. Explicit names refresh after `/rename` on the next
+sweep, even if the pane is otherwise quiet; generated placeholders and previews are never used.
+A named Claude session keeps priority in a window containing both agents. Without an explicit name,
+the window uses the agent type, or `agents` for a pair. After the agents exit, automatic naming
+returns to the running command. Line breaks and other control characters in conversation titles
+become spaces, since tmux's automatic naming requires a single line. Tmux applies its normal
+backslash escaping, as it does for manual window names.
+
+A manual tmux window rename takes precedence: tmux disables automatic naming for that window, and
+the plugin preserves that choice, including after the agents exit. Run `tmux setw automatic-rename on`
+in that window to follow conversation names again. Renaming a tmux window does not rename the agent
+conversation. Windows created with an explicit tmux name also keep it until automatic naming is enabled.
+
+The existing session hooks retain the pane's conversation identity
+even when reboot recovery is disabled; this does not enable backups. Detection requires both
 a matching terminal and ancestry from the pane process. This prevents container processes with the
 same `pts/N` names from labeling unrelated host shells as agents or SSH sessions. The plugin indicator
 uses `scripts/pane-processes.sh` with the same ancestry rule for its process-detection fallback.
-The shipped configuration runs presence sweeps on status refresh (normally every five seconds),
-without starting another full scan on each window change. A moved, closed or respawned pane invalidates
+The shipped configuration uses native tmux due-time gates for presence sweeps (normally every five
+seconds). Repeated redraws cannot start more work while a sweep is pending. Expired claims allow
+retry after a killed worker; only a successful sweep advances the next normal due time. Window
+changes do not start another full presence scan. A moved, closed or respawned pane invalidates
 its window's presence snapshot; the next sweep refreshes those labels using the new process identity.
 
 
@@ -407,7 +445,10 @@ The collector reads local agent data:
 - Claude: `cachedUsageUtilization` from `~/.claude.json`, plus fresh `rate_limits` captured from Claude's status-line input
 - Codex: the newest `token_count.rate_limits` snapshot under `~/.codex/sessions/`
 
-The installer wraps an existing Claude status-line command and passes its input and output through unchanged. `--uninstall-claude` restores the previous command. Expired data is hidden.
+When the tmux configuration displays `#{agent_limits}`, the installer wraps an existing Claude
+status-line command and passes its input and output through unchanged. If the segment is absent,
+reinstallation removes the wrapper and restores the previous command. `--uninstall-claude` also
+restores it. Expired data is hidden.
 
 Configuration:
 

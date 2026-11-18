@@ -72,7 +72,7 @@ def main():
                             '--state', 'running'], env=call_env, text=True, check=True,
                            input=json.dumps(dict(session_id='fixture', prompt_id=turn, hook_event_name='UserPromptSubmit')),
                            capture_output=True, timeout=15)
-            t('run', shlex.join(['python3', str(ROOT / 'scripts/state-lock.py'), '--wait', '/dev/null']))
+            t('run', shlex.join(['python3', str(ROOT / 'scripts/state-lock.py'), '--wait', '--barrier']))
 
         def seen(session):
             return t('show', '-qv', '-t', session, '@agent-indicator-session-seen') == '1'
@@ -181,7 +181,7 @@ def main():
             def question():
                 subprocess.run([str(ROOT / 'scripts/agent-state.sh'), '--agent', 'claude',
                                 '--state', 'needs-input'], env=call_env, check=True, capture_output=True)
-                t('run', shlex.join(['python3', str(ROOT / 'scripts/state-lock.py'), '--wait', '/dev/null']))
+                t('run', shlex.join(['python3', str(ROOT / 'scripts/state-lock.py'), '--wait', '--barrier']))
             def dots():
                 return subprocess.check_output([str(ROOT / 'scripts/session-dots.sh'), 'three'],
                                                env=call_env, text=True)
@@ -195,7 +195,7 @@ def main():
             assert not seen(second) and dots().count('X') == 1
             t('set', '-t', second, '@agent-indicator-session-seen', '1')
             t('run', str(ROOT / 'scripts/reset_all.sh'))
-            t('run', shlex.join(['python3', str(ROOT / 'scripts/state-lock.py'), '--wait', '/dev/null']))
+            t('run', shlex.join(['python3', str(ROOT / 'scripts/state-lock.py'), '--wait', '--barrier']))
             assert not seen(second) and not t('show', '-pqv', '-t', pane, '@agent-indicator-interrupt')
             print('PASS: session dots retain acknowledgement across renames and clear it on new work or reset', flush=True)
             t('kill-session', '-t', third)

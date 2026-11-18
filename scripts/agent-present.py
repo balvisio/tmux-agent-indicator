@@ -6,11 +6,16 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from contextlib import closing
+import sqlite3
 import subprocess
 import sys
 import uuid
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import runtime
+import scheduled
 DIRECTORY = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("notification_state", DIRECTORY / "notification-state.py")
 state = importlib.util.module_from_spec(spec)
@@ -32,7 +37,7 @@ def rows(command, fields):
 
 def pane_rows():
     return rows(["list-panes", "-a"], ["pane_id", "pane_pid", "pane_dead", "window_id",
-                "pane_tty", "@ssh_reconnect_host", "@ssh_reconnect_pid"])
+                "pane_tty", "@ssh_reconnect_host", "@ssh_reconnect_pid", "@agent_recovery"])
 
 
 def signature(panes):
@@ -50,13 +55,17 @@ def snapshot():
     panes = pane_rows()
     windows = dict.fromkeys(pane[3] for pane in panes)
     options = ("window-status-style", "window-status-current-style", "pane-active-border-style",
-               "@agent_present", "@agent_label", "@ssh_host", "@agent-indicator-state",
-               "@agent-indicator-review-pending", "@agent-indicator-shell-running")
+               "@agent_present", "@agent_label", "@agent_icons", "@agent_name", "window_name", "automatic-rename",
+               "@ssh_host", "@agent-indicator-state",
+               "@agent-indicator-review-pending", "@agent-indicator-shell-running",
+               "@agent-indicator-ack-needed", "@agent-indicator-layout", "@agent-indicator-repaint-needed")
     marker = "agent-style-" + uuid.uuid4().hex
     commands = []
     for window in windows:
         for option in options:
-            commands.extend([["show-options", "-wqv", "-t", window, option],
+            read = (["display-message", "-p", "-t", window, "#{window_name}"]
+                    if option == "window_name" else ["show-options", "-wqv", "-t", window, option])
+            commands.extend([read,
                              ["display-message", "-p", marker]])
     # Stream command text: large servers must not exceed tmux's argv-message limit.
     raw = state.tmux_commands(commands)
@@ -67,7 +76,7 @@ def snapshot():
         for option in options:
             value = next(values)
             emit("window", window, option, value[:-1] if value.endswith("\n") else "")
-    for pane, pid, dead, window, tty, marker_host, marker_pid in panes:
+    for pane, pid, dead, window, tty, marker_host, marker_pid, _conversation in panes:
         for key, value in (("pid", pid), ("dead", dead), ("window", window),
                            ("marker", marker_host), ("marker_pid", marker_pid)):
             emit("pane", pane, key, value)
@@ -76,26 +85,28 @@ def snapshot():
 
 
 def process_snapshot():
-    raw = subprocess.check_output(["ps", "-axo", "pid=,ppid=,tty=,command="], text=True, timeout=5)
+    raw = subprocess.check_output(["ps", "-axo", "pid=,ppid=,tty=,lstart=,command="], text=True, timeout=5)
     processes = {}
     for line in raw.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) == 4 and fields[0].isdigit() and fields[1].isdigit():
-            pid, parent, tty, command = fields
-            processes[pid] = (parent, tty[5:] if tty.startswith("/dev/") else tty, command)
+        fields = line.split(None, 8)
+        if len(fields) == 9 and fields[0].isdigit() and fields[1].isdigit():
+            pid, parent, tty = fields[:3]
+            processes[pid] = (parent, tty[5:] if tty.startswith("/dev/") else tty,
+                              fields[8], " ".join(fields[3:8]))
     return processes
 
 
-def pane_commands(processes, root, tty):
+def pane_processes(processes, root, tty):
     tty = tty[5:] if tty.startswith("/dev/") else tty
     if not tty:
         return
-    for pid, (_parent, terminal, command) in processes.items():
+    for owner, (_parent, terminal, _command, _started) in processes.items():
+        pid = owner
         if terminal != tty:
             continue
         for _ in range(100):
             if pid == root:
-                yield command
+                yield owner
                 break
             if pid not in processes or processes[pid][1] != tty:
                 break
@@ -103,6 +114,10 @@ def pane_commands(processes, root, tty):
             if pid == parent or pid == "1":
                 break
             pid = parent
+
+
+def pane_commands(processes, root, tty):
+    return (processes[pid][2] for pid in pane_processes(processes, root, tty))
 
 
 def ssh_host(words):
@@ -136,6 +151,49 @@ def claude_names():
     return names
 
 
+def codex_names(panes, processes):
+    """Read explicit names once per Codex home, using live hook-owned identities."""
+    homes = {}
+    for pane, root, dead, _window, tty, _marker, _marker_pid, raw in panes:
+        if dead != "0" or not raw:
+            continue
+        try:
+            record = json.loads(raw)
+            owner = str(record["pid"])
+            process = processes.get(owner)
+            if (record["kind"] != "codex" or not process
+                    or not runtime.same_start(process[3], record["started"])
+                    or owner not in pane_processes(processes, root, tty)
+                    or "codex" not in [word.rsplit("/", 1)[-1] for word in process[2].split()[:2]]):
+                continue
+            session = str(uuid.UUID(record["session"]))
+            home = Path(record.get("env", {}).get("CODEX_HOME")
+                        or os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+            homes.setdefault(home, {})[pane] = session
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    names = {}
+    for home, sessions in homes.items():
+        try:
+            databases = [path for path in home.glob("state_*.sqlite") if path.stem[6:].isdigit()]
+            if not databases:
+                continue
+            database = max(databases, key=lambda path: int(path.stem[6:]))
+            with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True,
+                                         timeout=0.05)) as db:
+                placeholders = ",".join("?" for _ in sessions)
+                saved = dict(db.execute(f"SELECT id, name FROM threads WHERE id IN ({placeholders})",
+                                        list(sessions.values())))
+            for pane, session in sessions.items():
+                name = saved.get(session)
+                if isinstance(name, str) and name:
+                    names[pane] = name.replace("\0", "")
+        except (OSError, ValueError, sqlite3.Error):
+            # Missing names must not interrupt presence or state reconciliation.
+            continue
+    return names
+
+
 def alive(pid):
     try:
         if not pid.isdigit() or int(pid) <= 0:
@@ -148,12 +206,12 @@ def alive(pid):
         return True
 
 
-def presence(panes, processes, names):
+def presence(panes, processes, names, codex=None):
     records = []
     for window in dict.fromkeys(p[3] for p in panes):
         members = [p for p in panes if p[3] == window]
-        kinds, name, host = [], "", ""
-        for pane, pid, dead, _window, tty, marker, marker_pid in members:
+        kinds, window_names, host = [], {}, ""
+        for pane, pid, dead, _window, tty, marker, marker_pid, _conversation in members:
             if marker and not alive(marker_pid):
                 records.extend(["stale", pane, pid, marker, marker_pid])
                 marker = ""
@@ -165,19 +223,25 @@ def presence(panes, processes, names):
             for agent in agents:
                 if agent not in kinds:
                     kinds.append(agent)
-                if agent == "claude" and not name:
-                    name = names.get(pane, "").replace("\0", "")
+                if not window_names.get(agent):
+                    source = names if agent == "claude" else codex or {}
+                    window_names[agent] = source.get(pane, "").replace("\0", "")
             if not host:
                 host = next((value for words in commands if (value := ssh_host(words))), "") or marker
         icons = "".join("🤖" if agent == "claude" else "🧠" for agent in kinds)
-        label = (icons + " " + (name or (kinds[0] if len(kinds) == 1 else "agents"))) if kinds else ""
+        name = window_names.get("claude") or window_names.get("codex")
+        name = name or (kinds[0] if len(kinds) == 1 else "agents")
+        # Native automatic naming rejects control characters, leaving the old
+        # window name in place. Conversation titles become one line in tmux.
+        name = "".join(" " if ord(char) < 32 or 127 <= ord(char) < 160 else char for char in name)
+        label = (icons + " " + name) if kinds else ""
         records.extend(["window", window, signature(members), label, host])
     return "\0".join(records) + "\0"
 
 
 def sweep(if_idle=False):
-    server = state.tmux("display-message", "-p", "#{socket_path}|#{pid}")
-    socket, pid = server.rsplit("|", 1)
+    server = runtime.identity()
+    socket, pid = server['socket'], server['pid']
     # Periodic status refreshes exit rather than accumulating background scans.
     # Explicit refreshes (including SSH lifecycle events) wait for a fresh scan.
     # This lock is separate from the FIFO writer lock and released on death.
@@ -186,28 +250,47 @@ def sweep(if_idle=False):
         try:
             fcntl.lockf(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if if_idle else 0))
         except BlockingIOError:
-            return
-        if not if_idle and state.tmux("display-message", "-p", "#{socket_path}|#{pid}") != server:
-            return
+            return False
+        if not runtime.server_alive(server):
+            return False
         panes = pane_rows()
-        data = presence(panes, process_snapshot(), claude_names())
-        if state.tmux("display-message", "-p", "#{socket_path}|#{pid}") != server:
-            return
+        processes = process_snapshot()
+        data = presence(panes, processes, claude_names(), codex_names(panes, processes))
+        if not runtime.server_alive(server):
+            return False
         subprocess.run([str(DIRECTORY / "window-state.sh"), "--sweep"], input=data,
                        text=True, check=True)
         for session, owner in rows(["list-sessions"], ["session_id", "@ssh_passthrough_pane"]):
             if owner:
                 subprocess.run([str(DIRECTORY / "ssh-passthrough.sh"), "check", session], check=True)
+        return True
 
 
 if __name__ == "__main__":
+    token = None
+    success = False
     try:
+        if '--scheduled' in sys.argv:
+            index = sys.argv.index('--scheduled')
+            token = sys.argv[index + 1]
+            del sys.argv[index:index + 2]
+            if not scheduled.owns('sweep', token):
+                sys.exit(0)
         if sys.argv[1:] == ["snapshot"]:
             snapshot()
+        elif sys.argv[1:] == ['setup']:
+            runtime.remember(runtime.identity())
+            runtime.private_directory('arrivals')
+            scheduled.install('sweep', [DIRECTORY / 'agent-present.sh', 'sweep', '--if-idle'])
         elif sys.argv[1:] in (["sweep"], ["sweep", "--if-idle"]):
-            sweep(if_idle="--if-idle" in sys.argv)
+            success = sweep(if_idle="--if-idle" in sys.argv)
         else:
             sys.exit("usage: agent-present.sh sweep [--if-idle]")
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"tmux-agent-indicator: presence sweep failed: {error}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        try:
+            scheduled.finish('sweep', token, 5 if success else 1)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass  # A dead server cannot consume the result; a live gate expires.

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # tmux-agent-indicator bootstrap.
 
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURRENT_DIR="${BASH_SOURCE[0]%/*}"
+[ "$CURRENT_DIR" != "${BASH_SOURCE[0]}" ] || CURRENT_DIR=.
+CURRENT_DIR="$(cd "$CURRENT_DIR" && pwd)"
 
 do_interpolation() {
     local string="$1"
@@ -24,30 +26,28 @@ update_tmux_option() {
 register_hook_once() {
     local hook_type="$1"
     local command="$2"
-    local match="${3:-$CURRENT_DIR}"
+    local match="$3"
     local existing_hooks
     existing_hooks=$(tmux show-hooks -g "$hook_type" 2>/dev/null || true)
 
-    # Remove all previously registered plugin hooks to avoid duplicates.
+    # Each owner replaces its own slot, preserving recovery and user hooks.
+    local -A occupied=()
+    local slot=900
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         local existing_name
         existing_name="${line%% *}"
-        tmux set-hook -gu "$existing_name" 2>/dev/null || true
-    done < <(printf '%s\n' "$existing_hooks" | grep -F -e "$match" -e "$CURRENT_DIR" || true)
-
-    tmux set-hook -ag "$hook_type" "$command"
-}
-
-register_focus_hooks() {
-    local hook_script="$CURRENT_DIR/scripts/pane-focus-in.sh"
-    local hook_command="run-shell -b \"$hook_script \\\"#{pane_id}\\\" \\\"#{window_id}\\\"\""
-    register_hook_once "pane-focus-in" "$hook_command"
-    register_hook_once "after-select-window" "$hook_command"
-    register_hook_once "after-select-pane" "$hook_command"
-    # Window switches that bypass select-window (a status-bar mouse click runs switch-client;
-    # next-/previous-/last-window have no after-* hooks) still fire session-window-changed.
-    register_hook_once "session-window-changed" "$hook_command"
+        if [[ "$line" == *"$match"* ]] ||
+           { [ "$hook_type" = client-session-changed ] && [[ "$line" == *"$CURRENT_DIR/scripts/session-changed.sh"* ]]; }; then
+            tmux set-hook -gu "$existing_name" 2>/dev/null || true
+        else
+            occupied["$existing_name"]=1
+        fi
+    done <<< "$existing_hooks"
+    while [ -n "${occupied[${hook_type}[$slot]]-}" ]; do
+        slot=$((slot + 1))
+    done
+    tmux set-hook -g "${hook_type}[$slot]" "$command"
 }
 
 register_interrupt_binding() {
@@ -67,20 +67,22 @@ register_interrupt_binding() {
 
 main() {
     tmux set-environment -g TMUX_AGENT_INDICATOR_DIR "$CURRENT_DIR"
+    python3 "$CURRENT_DIR/scripts/agent-present.py" setup
     update_tmux_option "status-right"
     update_tmux_option "status-left"
     update_tmux_option "@minimal-tmux-status-right"
     update_tmux_option "@minimal-tmux-status-left"
     update_tmux_option "@minimal-tmux-status-right-extra"
     update_tmux_option "@minimal-tmux-status-left-extra"
-    register_focus_hooks
+    python3 "$CURRENT_DIR/scripts/navigation.py"
     register_interrupt_binding
+    # Keep menu-bar labels derived from tmux's real window name, including manual
+    # renames and inactive windows. Native commands do not spawn a shell per rename.
+    register_hook_once "window-renamed" \
+        'if-shell -F "#{@agent_present}" { set-window-option -qF @agent_label "#{@agent_icons} #{window_name}" }' \
+        '@agent_label'
     # Recompute both source and destination windows after panes move, close, or exit.
     local state_script="$CURRENT_DIR/scripts/window-state.sh"
-    local state_command="run-shell -b \"$state_script \\\"#{hook_window}\\\"\""
-    register_hook_once "window-layout-changed" "$state_command"
-    register_hook_once "pane-exited" "$state_command"
-    register_hook_once "pane-died" "$state_command"
     tmux run-shell -b "\"$state_script\""
     source "$CURRENT_DIR/scripts/session-hooks.sh"
     register_session_hooks

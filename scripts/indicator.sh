@@ -2,7 +2,9 @@
 # Status bar indicator - shows agent icon from pane state or process detection.
 
 set -euo pipefail
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+script_dir="$(cd "$script_dir" && pwd)"
 
 # Check tmux availability and active server context
 if ! command -v tmux >/dev/null 2>&1; then

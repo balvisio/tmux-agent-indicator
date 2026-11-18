@@ -4,10 +4,28 @@
 declare -A agent_options agent_environment
 agent_snapshot_loaded=false
 
+cleanup_state_markers() {
+    # Command substitutions inherit the trap and exported marker paths. Only
+    # the owning shell may retire a writer that still holds the record lock.
+    [ "$BASHPID" = "$$" ] || return 0
+    local path owner ignored
+    local -a owned=()
+    for path in "${TMUX_AGENT_WRITER_MARKER:-}" "${TMUX_AGENT_ARRIVAL:-}"; do
+        [ -n "$path" ] && [ -f "$path" ] || continue
+        IFS=' ' read -r owner ignored < "$path" || true
+        [ "$owner" != "$$" ] || owned+=("$path")
+    done
+    [ "${#owned[@]}" -eq 0 ] || rm -f -- "${owned[@]}"
+    unset TMUX_AGENT_WRITER_MARKER TMUX_AGENT_ARRIVAL
+}
+trap cleanup_state_markers EXIT
+
 # One snapshot per writer; environment writes below keep the local copy current.
 load_state_snapshot() {
     local script_dir name value line
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    script_dir="${BASH_SOURCE[0]%/*}"
+    [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+    script_dir="$(cd "$script_dir" && pwd)"
     agent_options=()
     agent_environment=()
     agent_snapshot_loaded=false
@@ -30,7 +48,9 @@ load_state_snapshot() {
 lock_agent_state() {
     if [ "${1:-}" != --agent-state-lock-held ]; then
         local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        script_dir="${BASH_SOURCE[0]%/*}"
+        [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+        script_dir="$(cd "$script_dir" && pwd)"
         if [ "${1:-}" = --sweep ] || [ "${1:-}" = --all ]; then
             exec python3 "$script_dir/state-lock.py" --wait "$0" "$@"
         fi
@@ -46,6 +66,7 @@ lock_agent_state() {
 unlock_agent_state() {
     # POSIX record locks belong to this process, not to children inheriting descriptor 9.
     exec 9>&-
+    cleanup_state_markers
 }
 
 clear_pane_state() {
@@ -104,16 +125,18 @@ window_panes() {
     local window_id="$1" pane_id
     if [ "$agent_batch" = true ]; then
         for pane_id in ${agent_windows[$window_id|members]-}; do
-            printf '%s %s\n' "$pane_id" "${agent_panes[$pane_id|dead]}"
+            printf '%s %s %s\n' "$pane_id" "${agent_panes[$pane_id|pid]}" "${agent_panes[$pane_id|dead]}"
         done
     else
-        tmux list-panes -t "$window_id" -F '#{pane_id} #{pane_dead}' 2>/dev/null || true
+        tmux list-panes -t "$window_id" -F '#{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null || true
     fi
 }
 
 # Only live panes participate. A closed or moved pane cannot keep its old window colored.
 window_agent_state() {
-    local window_id="$1" pane_id dead state busy result=idle
+    local window_id="$1" pane_id pane_pid dead state busy result=idle
+    window_has_done=0
+    window_members=""
     # Reviews and background shells remain work after an agent finishes replying.
     if [ "$agent_batch" = true ]; then
         busy=0
@@ -127,26 +150,31 @@ window_agent_state() {
     if [ "$busy" = 1 ] && is_enabled "$(tmux_get_option_or_default @agent-indicator-running-enabled on)"; then
         result=running
     fi
-    while read -r pane_id dead; do
+    while read -r pane_id pane_pid dead; do
+        # A trailing semicolon is a tmux command separator even in an argv
+        # value. Use a literal delimiter shared with the native layout gate.
+        window_members+="$pane_id:$pane_pid:$dead|"
         [ "$dead" = 0 ] || continue
         state=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_STATE")
         case "$state" in
-            needs-input) printf '%s\n' needs-input; return ;;
-            running) result=running ;;
-            done) [ "$result" != idle ] || result=done ;;
+            needs-input) result=needs-input ;;
+            running) [ "$result" = needs-input ] || result=running ;;
+            done) window_has_done=1; [ "$result" != idle ] || result=done ;;
         esac
     done < <(window_panes "$window_id")
-    printf '%s\n' "$result"
+    window_state="$result"
 }
 
 render_window_state() {
     local window_id="$1" state bg fg border active_window style_active saved
+    local window_state window_has_done window_members repaint=0
     if [ "$agent_batch" = true ]; then
         [ -n "${agent_windows[$window_id|members]-}" ] || return 0
     else
         tmux list-windows -a -F '#{window_id}' | grep -qxF "$window_id" || return 0
     fi
-    state=$(window_agent_state "$window_id")
+    window_agent_state "$window_id"
+    state="$window_state"
     if [ "$state" = idle ]; then
         clear_window_title_style "$window_id"
         restore_active_border_style "$window_id"
@@ -164,6 +192,8 @@ render_window_state() {
             clear_window_title_style "$window_id"
         elif [ "$window_id" != "$active_window" ] || is_enabled "$style_active" || [ -n "$saved" ]; then
             apply_window_title_style "$window_id" "$bg" "$fg"
+        else
+            repaint=1
         fi
         border=$(tmux_get_option_or_default "@agent-indicator-${state}-border" "$(default_state_border "$state")")
         if ! is_enabled "$(tmux_get_option_or_default @agent-indicator-border-enabled on)" || [ "$border" = default ]; then
@@ -173,7 +203,17 @@ render_window_state() {
         fi
     fi
     # Consumers (including menu-bar dots) read this instead of choosing their own priority.
-    set_window_option "$window_id" @agent-indicator-state "$state"
+    if [ "$agent_batch" = true ]; then
+        set_window_option "$window_id" @agent-indicator-state "$state"
+        set_window_option "$window_id" @agent-indicator-ack-needed "$window_has_done"
+        set_window_option "$window_id" @agent-indicator-layout "$window_members"
+        set_window_option "$window_id" @agent-indicator-repaint-needed "$repaint"
+    else
+        tmux set-window-option -qt "$window_id" @agent-indicator-state "$state" \; \
+            set-window-option -qt "$window_id" @agent-indicator-ack-needed "$window_has_done" \; \
+            set-window-option -qt "$window_id" @agent-indicator-layout "$window_members" \; \
+            set-window-option -qt "$window_id" @agent-indicator-repaint-needed "$repaint"
+    fi
 }
 
 sync_animation() {
@@ -397,12 +437,19 @@ apply_pane_style() {
 # Publish a pane state and its aggregate window style under the writer lock.
 apply_agent_state() {
     local pane_id="$1" agent="$2" state="$3" pane_pid="$4"
-    local window_id active_pane_id state_bg
+    local window_id active_pane_id state_bg previous_agent
     pane_exists "$pane_id" || return 1
     [ "$(tmux display-message -p -t "$pane_id" '#{pane_pid}:#{pane_dead}')" = "$pane_pid:0" ] || return 1
     window_id=$(tmux display-message -p -t "$pane_id" '#{window_id}')
     active_pane_id=$(tmux display-message -p '#{pane_id}')
-    clear_pane_state "$pane_id"
+    previous_agent=$(tmux_get_env "TMUX_AGENT_PANE_${pane_id}_AGENT")
+    if [ -n "$previous_agent" ] && [ "$previous_agent" != "$agent" ] &&
+       [ "$(tmux_get_env "TMUX_AGENT_ACTIVE_PANE_${previous_agent}")" = "$pane_id" ]; then
+        tmux_unset_env "TMUX_AGENT_ACTIVE_PANE_${previous_agent}"
+    fi
+    if [ "$state" = off ]; then
+        clear_pane_state "$pane_id"
+    fi
     if [ "$state" != off ]; then
         tmux_set_env "TMUX_AGENT_PANE_${pane_id}_STATE" "$state"
         tmux_set_env "TMUX_AGENT_PANE_${pane_id}_AGENT" "$agent"
@@ -447,7 +494,9 @@ start_animation() {
     fi
 
     local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    script_dir="${BASH_SOURCE[0]%/*}"
+    [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+    script_dir="$(cd "$script_dir" && pwd)"
     nohup bash "$script_dir/animation.sh" >/dev/null 2>&1 &
     tmux_set_env TMUX_AGENT_ANIMATION_PID "$!"
     disown
@@ -464,6 +513,7 @@ stop_animation() {
 }
 
 
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notification-lib.sh"
-
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sweep-lib.sh"
+state_lib_dir="${BASH_SOURCE[0]%/*}"
+[ "$state_lib_dir" != "${BASH_SOURCE[0]}" ] || state_lib_dir=.
+source "$state_lib_dir/notification-lib.sh"
+source "$state_lib_dir/sweep-lib.sh"

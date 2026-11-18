@@ -11,7 +11,9 @@ if ! tmux display-message -p '#{session_name}' >/dev/null 2>&1; then
     exit 0
 fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+script_dir="$(cd "$script_dir" && pwd)"
 source "$script_dir/state-lib.sh"
 lock_agent_state "$@"
 shift
@@ -49,6 +51,7 @@ while IFS= read -r pane_id; do
     [ -z "$pane_id" ] && continue
     tmux set-option -p -t "$pane_id" window-style "bg=default" \; \
         set-option -pqu -t "$pane_id" @agent-indicator-interrupt \; \
+        set-option -pqu -t "$pane_id" @agent-indicator-track-owner \; \
         set-option -pqu -t "$pane_id" @agent-indicator-input-pending 2>/dev/null || true
 done < <(tmux list-panes -a -F '#{pane_id}')
 
@@ -63,9 +66,15 @@ while IFS= read -r window_id; do
     tmux set-window-option -qut "$window_id" @agent-indicator-review-pending
     tmux set-window-option -qut "$window_id" @agent-indicator-shell-running
     tmux set-window-option -qut "$window_id" @agent-indicator-notification-error
+    for field in ack-needed ack-held focus-request layout layout-request repaint-needed; do
+        tmux set-window-option -qut "$window_id" "@agent-indicator-$field"
+    done
 done < <(tmux list-windows -a -F '#{window_id}')
 
 tmux set-option -gqu @agent-indicator-notifications
+# Invalidate queued periodic work. The next normal status refresh may rescan.
+tmux set-option -gqu @agent-indicator-sweep-claim \; \
+    set-option -gqu @agent-indicator-sweep-due
 
 session_commands=()
 while IFS= read -r session_id; do

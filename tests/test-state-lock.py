@@ -188,7 +188,7 @@ esac
             if queue.exists():
                 for ticket in queue.iterdir():
                     try:
-                        os.kill(int(ticket.read_text()), signal.SIGKILL)
+                        os.kill(int(ticket.read_text().split()[0]), signal.SIGKILL)
                     except (ValueError, ProcessLookupError, FileNotFoundError):
                         pass
                 shutil.rmtree(queue)

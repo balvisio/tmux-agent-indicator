@@ -55,7 +55,9 @@ notify_state_change() {
 reconcile_notifications() {
     local script_dir events pane agent skipped=false input_agent input_state input_notify input_pid
     notification_silent=false
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    script_dir="${BASH_SOURCE[0]%/*}"
+    [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+    script_dir="$(cd "$script_dir" && pwd)"
     events=$(python3 "$script_dir/notification-state.py" "$@") || return 1
     while read -r pane agent input_agent input_state input_notify input_pid; do
         [ -n "$pane" ] || continue

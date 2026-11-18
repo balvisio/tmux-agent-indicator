@@ -103,7 +103,7 @@ Only custom display options are written; local agent states and saved window sty
 The script expects these window options from `scripts/agent-present.sh sweep` (wired up by the shipped `config/agent-indicator.conf`):
 
 - `@agent_present=1` for windows containing an agent.
-- `@agent_label` for their display labels.
+- `@agent_label` for display labels derived from the agent icons and actual tmux window names.
 - `@ssh_host` on local SSH windows for remote-host discovery.
 
 For remote notifications and Do Not Disturb, it uses the plugin's `scripts/agent-sound.sh` and

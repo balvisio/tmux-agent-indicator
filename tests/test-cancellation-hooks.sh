@@ -45,7 +45,7 @@ import json
 import sys
 with open(sys.argv[1]) as stream:
     entries = json.load(stream)["hooks"]["UserPromptSubmit"]
-commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
+commands = [hook["command"] + " <<<'{}'" for entry in entries for hook in entry["hooks"]]
 print("\n".join(reversed(commands)))
 PY
     )
@@ -65,7 +65,7 @@ import json
 import sys
 with open(sys.argv[1]) as stream:
     hooks = json.load(stream)["hooks"]
-print(hooks[sys.argv[2]][0]["hooks"][0]["command"])
+print(hooks[sys.argv[2]][0]["hooks"][0]["command"] + " <<<'{}'")
 PY
         )
         # Claude supplies its pane explicitly; Codex uses process ancestry.

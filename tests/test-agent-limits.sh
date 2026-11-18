@@ -91,7 +91,15 @@ original=$(settings_command "$TEST_DIR/claude/settings.json")
 HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" CODEX_CONFIG_DIR="$TEST_DIR/codex" \
     XDG_CONFIG_HOME="$TEST_DIR/xdg" "$ROOT_DIR/install.sh" \
     --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
+without_limits=$(settings_command "$TEST_DIR/claude/settings.json")
+[ "$without_limits" = "$original" ] || { echo 'FAIL: unused limits wrapper installed'; exit 1; }
+mkdir -p "$TEST_DIR/.tmux"
+printf '%s\n' "set -g status-right '#{agent_limits}'" > "$TEST_DIR/.tmux/agent-indicator.local.conf"
+HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" CODEX_CONFIG_DIR="$TEST_DIR/codex" \
+    XDG_CONFIG_HOME="$TEST_DIR/xdg" "$ROOT_DIR/install.sh" \
+    --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null
 first=$(settings_command "$TEST_DIR/claude/settings.json")
+[[ "$first" == *claude-statusline* ]] || { echo 'FAIL: displayed limits need a wrapper'; exit 1; }
 HOME="$TEST_DIR" TMUX_TMPDIR="$TEST_DIR" CLAUDE_CONFIG_DIR="$TEST_DIR/claude" CODEX_CONFIG_DIR="$TEST_DIR/codex" \
     XDG_CONFIG_HOME="$TEST_DIR/xdg" "$ROOT_DIR/install.sh" \
     --no-codex --no-opencode --no-tmux-conf --no-alias --no-hammerspoon >/dev/null

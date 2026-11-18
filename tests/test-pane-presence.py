@@ -26,6 +26,8 @@ def main():
         ps.write_text('''#!/bin/sh
 if [ "$1" = -t ]; then
     awk -v tty="$2" '$3 == tty { $3=""; print }' "$AGENT_TEST_PS_FILE"
+elif case "$*" in *lstart=*) true ;; *) false ;; esac; then
+    awk '{printf "%s %s %s Mon Nov 16 12:00:00 2026 ", $1, $2, $3; $1=$2=$3=""; sub(/^ +/, ""); print}' "$AGENT_TEST_PS_FILE"
 else
     cat "$AGENT_TEST_PS_FILE"
 fi

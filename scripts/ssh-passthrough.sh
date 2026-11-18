@@ -2,7 +2,9 @@
 # Toggle remote keyboard control; the presence sweep calls check when SSH may have ended.
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="${BASH_SOURCE[0]%/*}"
+[ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+script_dir="$(cd "$script_dir" && pwd)"
 # Serialize toggles and checks independently of agent state and style updates.
 if [ "${1:-}" != --agent-state-lock-held ]; then
     # Manual bindings must finish routing before tmux handles the next key.
