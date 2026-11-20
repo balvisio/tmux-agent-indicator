@@ -53,12 +53,28 @@ def main():
         script = (fixture / 'task-wrapper.sh').read_text()
         payload = "print('🧠' * 100000); import sys; print('x' * 100000, file=sys.stderr)"
         result = subprocess.run(['/bin/sh', '-c', script, 'fixture', str(output), str(errors),
-                                 sys.executable, '-c', payload], capture_output=True, timeout=8, check=True)
+                                 '/dev/null', sys.executable, '-c', payload], capture_output=True, timeout=8, check=True)
         assert not result.stdout and not result.stderr
         assert output.read_text() == '🧠' * 100000 + '\n'
         assert errors.read_text() == 'x' * 100000 + '\n'
         assert output.stat().st_mode & 0o777 == 0o600
         print('PASS: large background output cannot fill task pipes, stays private, and preserves Unicode')
+        stdin_file = fixture / 'input with spaces and "quotes\''
+        stdin_file.touch(mode=0o600)
+        data = ("🧠\n$(touch must-not-run)\n'quotes'\x00" * 10000).encode()
+        stdin_file.write_bytes(data)
+        command = ['/bin/sh', '-c', script, 'fixture', str(output), str(errors), str(stdin_file)]
+        subprocess.run([*command, sys.executable, '-c',
+                        'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'],
+                       capture_output=True, timeout=8, check=True)
+        assert output.read_bytes() == data, 'input must remain literal, including Unicode and NUL bytes'
+        result = subprocess.run([*command, '/bin/sh', '-c', 'exec 0<&-; exit 7'],
+                                capture_output=True, timeout=8)
+        assert result.returncode == 7, 'a child closing stdin must only fail its own task'
+        result = subprocess.run([*command, str(fixture / 'missing-executable')],
+                                capture_output=True, timeout=8)
+        assert result.returncode in (126, 127), result.returncode
+        print('PASS: file input preserves literal bytes and handles an early-closing or missing reader')
         # Reuse a user-configured socket without creating a new master or forking,
         # even when the interactive SSH configuration normally enables both.
         ssh = shutil.which("ssh")

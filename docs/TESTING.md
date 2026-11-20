@@ -375,6 +375,9 @@ stay waiting, and a new hook in the replacement pane must be accepted under its 
 `test-hammerspoon-dots.py` uses Lua with a mock Hammerspoon API and an isolated tmux server. It rejects
 synchronous shell calls and checks that cached menus still open while a local query is pending,
 with no accumulated polls. Timeout, late-callback, and recovery cases protect the cached snapshot.
+Task input must use private files instead of `hs.task:setInput`, which can raise `SIGPIPE` when a
+child closes its input before a queued write. The tests check literal Unicode/binary input, early
+reader exit, failed startup, and input-file cleanup after completion, failures, timeouts, and late callbacks.
 The SSH checks use `ssh -G` with an interactive-style configuration: probes must preserve a configured
 control socket (or its explicit absence) while disabling new masters, persistence, forks, and prompts.
 It also checks

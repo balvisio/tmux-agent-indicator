@@ -401,9 +401,19 @@ local function startTask(key, executable, args, callback, input)
     local function clean()
         os.remove(job.output)
         os.remove(job.errors)
+        if job.input then os.remove(job.input) end
     end
     job.clean = clean
-    local function complete(code, out, err)
+    local function finish(code, out, err)
+        if background[key] ~= job then clean(); return end
+        clean()
+        background[key] = nil
+        if callback then
+            local ok, failure = pcall(callback, code, out, err)
+            if not ok then note(key .. " error: " .. tostring(failure)) end
+        end
+    end
+    local function complete(code)
         if background[key] ~= job then clean(); return end
         local function read(path)
             local file = io.open(path, "rb")
@@ -413,22 +423,25 @@ local function startTask(key, executable, args, callback, input)
             if #value > 8 * 1024 * 1024 then return nil end
             return value
         end
-        out, err = read(job.output), read(job.errors)
-        clean()
+        local out, err = read(job.output), read(job.errors)
         if not out or not err then code, out, err = -1, "", "cannot read task output" end
-        background[key] = nil
-        if callback then
-            local ok, failure = pcall(callback, code, out, err)
-            if not ok then note(key .. " error: " .. tostring(failure)) end
-        end
+        finish(code, out, err)
     end
-    local command = { "-c", 'out=$1; err=$2; shift 2; exec "$@" >"$out" 2>"$err"',
-        "agent-dots", job.output, job.errors, executable }
+    background[key] = job
+    -- A child can close stdin before hs.task's queued writer runs, killing
+    -- Hammerspoon with SIGPIPE. Read input from a private file instead.
+    if input then
+        job.input = os.tmpname()
+        local file = io.open(job.input, "wb")
+        local written = file and file:write(input)
+        local closed = file and file:close()
+        if not written or not closed then finish(-1, "", "cannot write task input"); return end
+    end
+    local command = { "-c", 'out=$1; err=$2; input=$3; shift 3; exec "$@" <"$input" >"$out" 2>"$err"',
+        "agent-dots", job.output, job.errors, job.input or "/dev/null", executable }
     for _, value in ipairs(args) do command[#command + 1] = value end
     job.task = hs.task.new("/bin/sh", complete, command)
-    background[key] = job
-    if input and job.task then job.task:setInput(input) end
-    if not job.task or not job.task:start() then complete(-1, "", "cannot start task") end
+    if not job.task or not job.task:start() then finish(-1, "", "cannot start task") end
 end
 
 local function expireTasks()

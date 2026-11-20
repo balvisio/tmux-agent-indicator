@@ -86,6 +86,7 @@ local function executeFixture(command, input)
     end
 local delayedLocal = false
 local localTasks = {}
+local failLocalStart, failLocalCreate = false, false
 hs = {
     fs = {mkdir = function(path) os.execute('mkdir -p ' .. quote(path)) end},
     hotkey = {
@@ -163,13 +164,20 @@ hs = {
     task = {new = function(executable, callback, args)
         if not executable:match('/scripts/vpn%-guard%.py$') then
             assert(executable == '/bin/sh' and args[3] == 'agent-dots', 'task output must not fill a pipe before exit')
-            local outputFile, errorFile = args[4], args[5]
+            local outputFile, errorFile, inputFile = args[4], args[5], args[6]
+            local input
+            if inputFile ~= '/dev/null' then
+                local file = assert(io.open(inputFile, 'rb'))
+                input = file:read('*a')
+                file:close()
+            end
             local wrapper = assert(io.open(arg[2] .. '/task-wrapper.sh', 'w'))
             wrapper:write(args[2]):close()
-            local command = args[6]
-            for index = 7, #args do command = command .. ' ' .. quote(args[index]) end
-            local task = {callback = callback, command = command,
-                setInput = function(self, input) self.input = input; return self end,
+            local command = args[7]
+            for index = 8, #args do command = command .. ' ' .. quote(args[index]) end
+            local task = {callback = callback, command = command, input = input,
+                outputFile = outputFile, errorFile = errorFile, inputFile = inputFile,
+                setInput = function() error('hs.task pipe writes can terminate Hammerspoon with SIGPIPE') end,
                 finish = function(self, code, out)
                     self.running = false
                     if not code then
@@ -183,8 +191,10 @@ hs = {
                     file:close()
                     callback(code, '', '')
                     assert(not io.open(outputFile, 'rb') and not io.open(errorFile, 'rb'), 'completed output must be removed')
+                    assert(inputFile == '/dev/null' or not io.open(inputFile, 'rb'), 'completed input must be removed')
                 end,
                 start = function(self)
+                    if failLocalStart then return false end
                     self.running = true
                     if not delayedLocal then self:finish() end
                     return self
@@ -192,6 +202,7 @@ hs = {
                 isRunning = function(self) return self.running end,
                 terminate = function(self) self.running = false; self.terminated = true end}
             localTasks[#localTasks + 1] = task
+            if failLocalCreate then return nil end
             return task
         end
         assert(executable:match('/scripts/vpn%-guard%.py$'), 'remote tasks must use the VPN guard')
@@ -862,3 +873,72 @@ hs.shutdownCallback()
 assert(pending.terminated, 'reload must stop unfinished checks and remove their output')
 pending:finish(0, '')
 print('PASS: reloading cancels pending work and cleans private task output')
+
+-- Exercise the real helper without starting remote discovery or status polling.
+local source = assert(io.open(arg[1], 'r'))
+local text = source:read('*a')
+source:close()
+local first = assert(text:find('local function startTask(', 1, true))
+local last = assert(text:find('local function tmuxTask(', first, true))
+local startTask, expireTasks = assert(load(
+    'local background = {}; local LOCAL_TIMEOUT = 10; local function note() end\n'
+    .. text:sub(first, last - 1) .. '\nreturn startTask, expireTasks'))()
+local function removed(task)
+    for _, path in ipairs({task.inputFile, task.outputFile, task.errorFile}) do
+        assert(path == '/dev/null' or not io.open(path, 'rb'), 'task left a private file behind: ' .. path)
+    end
+end
+local payload = 'Unicode 🧠\n$(touch never)\nquotes " and \'\0binary\n'
+local completions, lastCode = 0, nil
+local function completed(code)
+    completions, lastCode = completions + 1, code
+end
+startTask('input', '/bin/true', {}, completed, payload)
+pending = localTasks[#localTasks]
+assert(pending.input == payload, 'input bytes must reach the task unchanged')
+pending:finish(0, '')
+removed(pending)
+assert(completions == 1 and lastCode == 0)
+
+for _, failure in ipairs({'create', 'start', 'write'}) do
+    local paths, oldTmpname, oldOpen = {}, os.tmpname, io.open
+    os.tmpname = function()
+        local path = oldTmpname()
+        paths[#paths + 1] = path
+        return path
+    end
+    failLocalCreate, failLocalStart = failure == 'create', failure == 'start'
+    if failure == 'write' then
+        io.open = function(path, mode)
+            if mode == 'wb' then return nil, 'fixture: disk full' end
+            return oldOpen(path, mode)
+        end
+    end
+    local before = completions
+    startTask('input', '/bin/true', {}, completed, payload)
+    os.tmpname, io.open = oldTmpname, oldOpen
+    failLocalCreate, failLocalStart = false, false
+    assert(completions == before + 1 and lastCode == -1, 'report ' .. failure .. ' failure')
+    for _, path in ipairs(paths) do assert(not io.open(path, 'rb'), failure .. ' leaked ' .. path) end
+    startTask('input', '/bin/true', {}, completed, payload)
+    pending = localTasks[#localTasks]
+    assert(pending.running, 'failure must release the task slot for retry')
+    pending:finish(0, '')
+end
+
+startTask('input', '/bin/true', {}, completed, payload)
+pending = localTasks[#localTasks]
+os.time = function() return originalTime() + 11 end
+expireTasks()
+os.time = originalTime
+removed(pending)
+assert(pending.terminated and lastCode == -1, 'timeout must terminate the task and clean its input')
+local before = completions
+startTask('input', '/bin/true', {}, completed, payload)
+replacement = localTasks[#localTasks]
+pending:finish(0, '')
+assert(completions == before and io.open(replacement.inputFile, 'rb'),
+    'late completion must leave replacement input and callback alone')
+replacement:finish(0, '')
+removed(replacement)
+print('PASS: task input preserves bytes without pipe writes and is cleaned after completion, failures, timeout, and late callbacks')

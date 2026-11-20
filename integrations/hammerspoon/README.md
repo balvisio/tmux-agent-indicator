@@ -58,7 +58,9 @@ window selection, and sounds run asynchronously, so a slow command cannot block 
 Local windows and SSH links share one tmux query. A pending check is not queued again; after ten
 seconds a stalled local check is cancelled and retried. Completed output is read from private
 temporary files, removed after each check or reload, so large process listings cannot fill a pipe
-and stall discovery. Other Hammerspoon modules share the same
+and stall discovery. Task input also uses private files: a child exiting before it reads its input
+cannot trigger a `SIGPIPE` in Hammerspoon's asynchronous pipe writer. Input files are removed on
+completion, failure, timeout, or reload. Other Hammerspoon modules share the same
 UI thread, so synchronous commands in those modules can still delay the menu.
 
 Remote checks reuse an existing authenticated SSH connection through the user's `ControlPath`.
