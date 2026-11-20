@@ -23,7 +23,7 @@ input_status = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(input_status)
 
 OPTION = "@agent-indicator-notifications"
-TERMINAL = {"completed", "skipped", "cancelled", "paused"}
+TERMINAL = {"completed", "skipped", "cancelled", "paused", "undelivered"}
 
 
 def exchange_id(session, prompt):
@@ -52,9 +52,9 @@ def hook_data(payload):
     prompt = payload.get("prompt") or ""
     result["task_notification"] = prompt.lstrip().startswith("<task-notification>")
     intervals = {(0, len(prompt))} if prompt else set()
-    # Codex may process several queued messages in one turn. Match each complete
+    # Either agent may receive several messages or a draft in one turn. Match each complete
     # forwarded exchange, including messages containing a quoted kibitz header.
-    starts = [m.start() for m in re.finditer(r"\[kibitz from:claude\]", prompt)]
+    starts = [m.start() for m in re.finditer(r"\[kibitz from:(?:claude|codex)\]", prompt)]
     ends = starts[1:] + [len(prompt)]
     for start in starts:
         for end in ends:
@@ -310,7 +310,7 @@ class Notifications:
                     matches[review.get("hash")] -= 1
             for review in self.reviews.values():
                 digest = review.get("hash")
-                if (turn and review["reviewer"] == pane and review["phase"] in ("queued", "error", "paused")
+                if (turn and review["reviewer"] == pane and review["phase"] in ("queued", "error", "unsubmitted", "paused")
                         and matches[digest] > 0):
                     review.update(phase="running", turn=turn)
                     matches[digest] -= 1
@@ -347,7 +347,7 @@ class Notifications:
                     self.discard_review(review)
                     continue
                 cancelled_turn = turn or current["turn"]
-                host_cancelled = (review["host"] == pane and review["phase"] in ("expected", "error")
+                host_cancelled = (review["host"] == pane and review["phase"] in ("expected", "error", "unsubmitted")
                                   and (event == "SessionEnd" or
                                        review["session"] + ":" + review["prompt"] == cancelled_turn))
                 reviewer_cancelled = (review["reviewer"] == pane and
@@ -408,12 +408,27 @@ class Notifications:
         action = message.get("action")
         if action == "expect":
             self.begin(host, session + ":" + prompt)
-        elif action == "queue" and review["phase"] in ("expected", "error"):
+        elif action == "queue" and review["phase"] in ("expected", "error", "unsubmitted", "undelivered"):
+            # A prior attempt that sent no submit key can be replaced by an
+            # explicit retry of the same text. Unknown submission outcomes
+            # remain outstanding; matching text alone cannot retire them.
+            for older in self.reviews.values():
+                if (older is not review and older["phase"] == "unsubmitted"
+                        and older["host"] == host and older["reviewer"] == review["reviewer"]
+                        and older.get("hash") == message["hash"]):
+                    older["phase"] = "undelivered"
             review.update(phase="queued", hash=message["hash"])
         elif action == "skip" and review["phase"] == "expected":
             review["phase"] = "skipped"
+        elif action == "undelivered" and review["phase"] in ("expected", "queued"):
+            # The sender proved no paste occurred. Release only this attempt,
+            # preserving the host's completion and any receiver-confirmed work.
+            # Ambiguous/partial delivery stays outstanding as an error.
+            review["phase"] = "undelivered"
         elif action == "fail" and review["phase"] in ("expected", "queued"):
             review["phase"] = "error"
+        elif action == "unsubmitted" and review["phase"] in ("expected", "queued"):
+            review["phase"] = "unsubmitted"
 
     def acknowledge(self, window):
         if window in self.windows:
@@ -563,7 +578,7 @@ def main():
                          str(int(window["review_pending"]))])
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-shell-running",
                          str(int(window["shell_running"]))])
-        failed = any(r["phase"] == "error" and r["host"] in live
+        failed = any(r["phase"] in ("error", "unsubmitted") and r["host"] in live
                      and live[r["host"]]["window"] == wid for r in tracker.reviews.values())
         commands.append(["set-option", "-wq", "-t", wid, "@agent-indicator-notification-error",
                          "Kibitz delivery failed" if failed else ""])

@@ -709,7 +709,8 @@ pending alerts without hiding the shell work. No shell command text is stored in
 
 For Kibitz pairs, update and reinstall both plugins. The indicator waits for the specific forwarded
 review, including queued reviews; `/mute` skips that wait and `/tee` tracks the review started at prompt
-submission. Pending reviews also keep the window title and menu-bar dot yellow between agents;
+submission. Both Claude and Codex sender headers are recognized when a forwarded message arrives
+alongside a draft or other messages. Pending reviews also keep the window title and menu-bar dot yellow between agents;
 input-needed magenta still takes priority. Claude's background-task completion messages continue the
 original request instead of reserving another review. There is no fixed delay or timeout that treats
 unfinished reviews as complete. These hooks require Claude's `prompt_id` and Codex's `turn_id` fields. After
@@ -726,9 +727,12 @@ If delivery fails, check `~/.claude/kibitz-hook.log` and the window diagnostic:
 tmux show-option -wqv @agent-indicator-notification-error
 ```
 
-Resolve the failed delivery or restart the Kibitz pair before starting another exchange. Failures do
-not produce a successful-completion alert. Notifications are enabled by default for `needs-input` and
-`done` states.
+A refusal proven to have pasted nothing releases that review attempt, allowing the host's own
+completion to ring. A retry gets its own delivery record and replaces older copies of the same message
+that are known to have sent no submit key. Unconfirmed submissions remain tracked: matching text alone
+cannot retire them. Check the target pane before retrying, or restart the pair after discarding the message.
+Neither a timeout nor a failed transport proves a review completed. Notifications are enabled by
+default for `needs-input` and `done` states.
 
 ```tmux
 # Disable notifications entirely

@@ -86,6 +86,10 @@ changing the state color. Open tmux's rename prompt (prefix + comma) to confirm 
 name without icons, then cancel the prompt. A manual tmux rename should persist through later agent
 renames and exit; `tmux setw automatic-rename on` should resume automatic naming.
 
+Grouped-notification tests cover both Kibitz sender headers, including Codex-to-Claude `/tee`
+messages merged with a draft or with another message. Each delivered reservation must complete,
+and the finished window must emit exactly one notification.
+
 The input-delay checks use isolated tmux sockets and synthetic Claude status files written by a
 process inside the test pane. They verify early and late answers, stale status, parallel tools,
 duplicate questions, interruption, timer replacement, and yellow/magenta styles and bell counts.
@@ -400,6 +404,11 @@ reservation for the wakeup. Codex tool yields must not complete the review befor
 Cancellation tests distinguish abandoned reservations from dispatched reviews and preserve a newer
 turn's completion. Kibitz's handoff tests cover replaced prompts, successful and failed TaskStop calls,
 remaining background work, and retrying a failed cancellation.
+Delivery-refusal tests distinguish no paste, a pasted draft with no submit key, and an unknown submission.
+A no-paste refusal releases its reservation; an explicit retry replaces an older known-unsubmitted copy
+of the same message. Unknown submissions and different messages remain tracked. The host's completion
+is preserved, an identical retry matches the new reservation, and a late refusal cannot overwrite
+receiver-confirmed work.
 Attached task-completion tests keep the receiving turn's review pending, retire the older
 undispatched reservation only with terminal evidence for every task, and check both Stop-hook
 orders. The window stays yellow and silent until the receiving turn's reviewer finishes, then

@@ -25,6 +25,43 @@ def payload(session, turn, event, prompt=''):
                 hook_event_name=event, message_hashes=[module.message_hash(prompt)])
 
 
+def run_kibitz_hook(tmux, env, script, data, pane):
+    """Run the real hook as a descendant of its isolated fixture pane.
+
+    These tests cover notification accounting. The transport is inert, as in
+    the old tmux-bridge stub; the Kibitz transport suite tests actual pastes.
+    Source validation remains enabled and checks the real process ancestry.
+    """
+    directory = Path(tempfile.mkdtemp(prefix='hook-call-', dir=env['HOME']))
+    payload_file = directory / 'input.json'
+    payload_file.write_text(json.dumps(data))
+    runner = directory / 'runner.py'
+    runner.write_text(
+        'import runpy, sys\nfrom pathlib import Path\n'
+        'sys.path.insert(0, str(Path(sys.argv[1]).parent))\n'
+        'import kibitz_hook_common as common\n'
+        'def transport(*args, **kwargs):\n'
+        '    callback = kwargs.get("before_paste")\n'
+        '    if callback: callback()\n'
+        'common.forward = common.forward_prompt = transport\n'
+        'runpy.run_path(sys.argv[1], run_name="__main__")\n')
+    output, error, result = (directory / name for name in ('stdout', 'stderr', 'result'))
+    invocation = ['env'] + [key+'='+value for key, value in dict(env, TMUX_PANE=pane).items()]
+    invocation += [sys.executable, str(runner), str(script)]
+    command = (shlex.join(invocation)+' < '+shlex.quote(str(payload_file))+' > '+shlex.quote(str(output))
+               +' 2> '+shlex.quote(str(error))+"; printf '%s' $? > "+shlex.quote(str(result)))
+    tmux('send-keys', '-l', '-t', pane, command)
+    tmux('send-keys', '-t', pane, 'Enter')
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if result.exists() and result.read_text():
+            if result.read_text() != '0':
+                raise AssertionError(error.read_text())
+            return
+        time.sleep(.02)
+    raise AssertionError('fixture hook timed out: '+(error.read_text() if error.exists() else str(script)))
+
+
 class CompletionTest(unittest.TestCase):
     def setUp(self):
         self.live = {'%1': dict(pid='101', window='@1', host='', state='idle'),
@@ -145,6 +182,90 @@ class CompletionTest(unittest.TestCase):
         self.handoff('queue')
         self.state('%2', 'running', 'r1', 'reviewer', 'review')
         self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+
+    def test_unpasted_delivery_releases_review_but_preserves_host_completion(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.state('%1', 'done')
+        self.assertEqual(len(self.handoff('undelivered')), 1)
+        self.assertFalse(self.handoff('undelivered'))
+        self.assertTrue(self.n.windows['@1']['ready'])
+
+    def test_refusal_before_queue_does_not_block_host_completion(self):
+        self.state('%1', 'running')
+        self.handoff('undelivered')
+        self.assertEqual(len(self.state('%1', 'done')), 1)
+
+    def test_retry_after_unpasted_refusal_matches_only_the_new_reservation(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.handoff('undelivered')
+        self.state('%1', 'done')
+        self.state('%1', 'running', 'h2')
+        self.handoff('queue', 'h2')
+        self.state('%1', 'done', 'h2')
+        self.state('%2', 'running', 'r2', 'reviewer', 'review')
+        self.assertEqual(len(self.state('%2', 'done', 'r2', 'reviewer')), 1)
+        self.assertEqual(self.n.reviews[module.exchange_id('host', 'h1')]['phase'], 'undelivered')
+        self.assertEqual(self.n.reviews[module.exchange_id('host', 'h2')]['phase'], 'completed')
+
+    def test_unpasted_notice_cannot_release_receiver_confirmed_or_ambiguous_work(self):
+        for phase in ('running', 'error', 'completed'):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.state('%1', 'running')
+                self.handoff('queue')
+                if phase == 'error':
+                    self.handoff('fail')
+                else:
+                    self.state('%2', 'running', 'r1', 'reviewer', 'review')
+                    if phase == 'completed':
+                        self.state('%2', 'done', 'r1', 'reviewer')
+                self.handoff('undelivered')
+                self.assertEqual(self.n.reviews[module.exchange_id('host', 'h1')]['phase'], phase)
+
+    def test_retry_in_same_host_turn_can_reserve_again_after_no_paste(self):
+        self.state('%1', 'running')
+        self.handoff('undelivered')
+        self.handoff('queue')
+        self.state('%1', 'done')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+
+    def test_retry_replaces_only_a_known_unsubmitted_copy_of_the_same_text(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.handoff('unsubmitted')
+        self.assertFalse(self.state('%1', 'done'))
+        self.state('%1', 'running', 'h2')
+        self.handoff('queue', 'h2')
+        self.assertEqual(self.n.reviews[module.exchange_id('host', 'h1')]['phase'], 'undelivered')
+        self.state('%1', 'done', 'h2')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
+
+    def test_retry_does_not_discard_an_unknown_submission_or_other_message(self):
+        for phase, retry_text in (('fail', 'review'), ('unsubmitted', 'different review')):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.state('%1', 'running')
+                self.handoff('queue')
+                self.handoff(phase)
+                self.state('%1', 'done')
+                self.state('%1', 'running', 'h2')
+                self.handoff('queue', 'h2', retry_text)
+                self.state('%1', 'done', 'h2')
+                self.state('%2', 'running', 'r1', 'reviewer', retry_text)
+                self.assertFalse(self.state('%2', 'done', 'r1', 'reviewer'))
+
+    def test_manually_submitted_draft_completes_before_a_retry(self):
+        self.state('%1', 'running')
+        self.handoff('queue')
+        self.handoff('unsubmitted')
+        self.state('%2', 'running', 'r1', 'reviewer', 'review')
+        self.state('%1', 'running', 'h2')
+        self.handoff('queue', 'h2')
+        self.assertEqual(self.n.reviews[module.exchange_id('host', 'h1')]['phase'], 'running')
 
     def test_abandoned_expectation_cancels_without_a_completion_bell(self):
         self.state('%1', 'running')
@@ -547,6 +668,26 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(len(self.state('%2', 'done', 'r1', 'reviewer')), 1)
         self.assertTrue(all(r['phase'] == 'completed' for r in self.n.reviews.values()))
 
+    def test_codex_host_reviews_complete_with_merged_prompts_or_a_draft(self):
+        for merged in (False, True):
+            with self.subTest(merged=merged):
+                self.setUp()
+                messages = ['[kibitz from:codex]\n\nUSER:\none']
+                if merged:
+                    messages.append('[kibitz from:codex]\n\nUSER:\ntwo')
+                for index, text in enumerate(messages):
+                    turn = 'h' + str(index)
+                    self.n.state('%1', 'codex', 'running', payload('host', turn, 'UserPromptSubmit'))
+                    self.handoff('queue', turn, text)
+                    self.n.state('%1', 'codex', 'done', payload('host', turn, 'Stop'))
+                incoming = module.hook_data(dict(session_id='reviewer', prompt_id='r1',
+                    hook_event_name='UserPromptSubmit', prompt='Existing draft\n\n'+'\n\n'.join(messages)))
+                self.n.state('%2', 'claude', 'running', incoming)
+                self.assertTrue(all(r['phase'] == 'running' for r in self.n.reviews.values()))
+                self.n.state('%2', 'claude', 'done', payload('reviewer', 'r1', 'Stop'))
+                self.assertEqual(len(self.n.completions()), 1)
+                self.assertTrue(all(r['phase'] == 'completed' for r in self.n.reviews.values()))
+
 
 class ClaudeShellTest(unittest.TestCase):
     def setUp(self):
@@ -666,7 +807,7 @@ class StorageIntegrationTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix='notification-storage-')
         self.addCleanup(self.directory.cleanup)
         self.tmp = Path(self.directory.name)
-        self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.tmp), 'SHELL': '/bin/bash',
+        self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.tmp), 'SHELL': '/bin/bash', 'HISTFILE': '/dev/null',
                     'TMUX_TMPDIR': str(self.tmp), 'XDG_CONFIG_HOME': str(self.tmp/'config'),
                     'XDG_CACHE_HOME': str(self.tmp/'cache'), 'XDG_STATE_HOME': str(self.tmp/'state'),
                     'CODEX_HOME': str(self.tmp/'codex'), 'CODEX_CONFIG_DIR': str(self.tmp/'codex'),
@@ -877,9 +1018,8 @@ class StorageIntegrationTest(unittest.TestCase):
         self.tmux('set', '-p', '-t', reviewer, '@name', 'codex')
         transcript = self.tmp/'transcript.jsonl'
         def run(name, data):
-            subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
-                           env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
-                           text=True, check=True, capture_output=True, timeout=20)
+            run_kibitz_hook(self.tmux, dict(self.env, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
+                            kibitz/'hooks'/name, data, self.host)
         for number, kind in enumerate(('replacement', 'TaskStop', 'attachment'), 1):
             old, new = kind+'-old', kind+'-new'
             entries = [dict(type='user', promptId=old, uuid=old, parentUuid='anchor',
@@ -945,9 +1085,8 @@ class StorageIntegrationTest(unittest.TestCase):
         transcript = self.tmp/'transcript.jsonl'
 
         def run(name, data):
-            subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
-                           env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
-                           text=True, check=True, capture_output=True, timeout=20)
+            run_kibitz_hook(self.tmux, dict(self.env, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
+                            kibitz/'hooks'/name, data, self.host)
 
         def write(entries):
             transcript.write_text(''.join(json.dumps(e)+'\n' for e in entries))
@@ -1050,9 +1189,8 @@ class StorageIntegrationTest(unittest.TestCase):
         data = dict(session_id='host', prompt_id='unrecorded', prompt='summarize',
                     hook_event_name='UserPromptSubmit', transcript_path=str(transcript))
         def run(name):
-            subprocess.run([sys.executable, str(kibitz/'hooks'/name)], input=json.dumps(data),
-                           env=dict(self.env, TMUX_PANE=self.host, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
-                           text=True, check=True, capture_output=True, timeout=20)
+            run_kibitz_hook(self.tmux, dict(self.env, TMUX_AGENT_INDICATOR_DIR=str(ROOT)),
+                            kibitz/'hooks'/name, data, self.host)
         run('kibitz_hook_user_prompt_submit.py')
         self.hook(self.host, 'running', data)
         # The abandoned submission has neither a transcript entry nor a Stop.
@@ -1086,7 +1224,7 @@ class HookIntegrationTest(unittest.TestCase):
             self.skipTest('matching Kibitz checkout needed; set KIBITZ_TEST_REPO')
         with tempfile.TemporaryDirectory(prefix='group-notification-') as directory:
             tmp = Path(directory)
-            env = {'PATH': os.environ['PATH'], 'HOME': str(tmp), 'SHELL': '/bin/bash',
+            env = {'PATH': os.environ['PATH'], 'HOME': str(tmp), 'SHELL': '/bin/bash', 'HISTFILE': '/dev/null',
                    'TMUX_TMPDIR': str(tmp), 'XDG_CONFIG_HOME': str(tmp/'config'),
                    'XDG_CACHE_HOME': str(tmp/'cache'), 'XDG_STATE_HOME': str(tmp/'state'),
                    'CODEX_HOME': str(tmp/'codex'), 'CODEX_CONFIG_DIR': str(tmp/'codex'),
@@ -1098,8 +1236,11 @@ class HookIntegrationTest(unittest.TestCase):
                                                text=True, stderr=subprocess.STDOUT, timeout=10).strip()
             def run(script, data, *args, pane):
                 e = dict(env, TMUX_PANE=pane)
-                subprocess.run([str(script), *args], input=json.dumps(data), env=e, text=True,
-                               check=True, capture_output=True, timeout=20)
+                if script.parent == kibitz/'hooks':
+                    run_kibitz_hook(tmux, e, script, data, pane)
+                else:
+                    subprocess.run([str(script), *args], input=json.dumps(data), env=e, text=True,
+                                   check=True, capture_output=True, timeout=20)
             try:
                 tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'test', '/bin/bash --noprofile --norc')
                 env['TMUX'] = tmux('display-message', '-p', '#{socket_path},#{pid},0')
